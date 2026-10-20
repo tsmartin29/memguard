@@ -12,10 +12,13 @@ It only touches processes STARTED BY an agent session (some ancestor matches `se
   more heavy jobs than the memory budget allows              -> pause the newer ones
   paused jobs resume one at a time once memory is back above resume_avail_gb
   stuck rule: low memory for stuck_seconds with jobs paused  -> stop the lowest-ranked paused job
+  pressure level 2 (macOS "warn") can last for hours with plenty of memory free, so by default (level2_one_job) one job
+    may keep running at level 2 while available memory is above pause_avail_gb + level2_run_margin_gb, and when nothing
+    is running the smallest paused job is resumed (deadlock breaker) once available is above pause_avail_gb + level2_resume_margin_gb
 
 It also acts as the dispatcher for the `heavyrun` queue: it decides which queued jobs may start next
 (priority tickets, then rank.txt order, then first come first served) and holds all new heavy jobs while
-swap is high or the disk is nearly full.
+swap is high or the disk is nearly full. An optional manual_order file lets a UI drag-and-drop re-rank the queue.
 
 Config: $MEMGUARD_CONFIG, else $MEMGUARD_HOME/config.json (default home: ~/.config/memguard). See config.example.json.
 Usage:  memguard.py            one pass (this is what launchd runs)
@@ -40,6 +43,13 @@ DEFAULTS = {
     # Swap: macOS keeps old swap long after memory pressure is gone, so swap alone would hold jobs for hours.
     # Hold only when swap is above swap_hard_gb, or above swap_hold_gb while available memory is under swap_low_avail_gb.
     "swap_hold_gb": 6, "swap_low_avail_gb": 8, "swap_hard_gb": 10,
+    # macOS can sit at pressure level 2 for hours with several GB free. With level2_one_job, level 2 alone does not pause the
+    # last running job (needs available > pause_avail_gb + level2_run_margin_gb), and if everything is paused at level 2 the
+    # smallest paused job is resumed once available > pause_avail_gb + level2_resume_margin_gb. False = pause on any level 2.
+    "level2_one_job": True, "level2_run_margin_gb": 1, "level2_resume_margin_gb": 2,
+    # Jobs whose queue label matches this regex (case-insensitive) are stopped last by the stuck rule and are never moved by manual_order.
+    # Empty string = no priority labels.
+    "priority_pattern": "priority",
     "stall_alert_minutes": 45,    # one notification (and a line in stalled.txt) when a queued job waits this long; 0 = off
     "disk_path": "~",             # which disk to watch
     "stuck_seconds": 300, "stuck_interval_seconds": 60,
@@ -61,6 +71,7 @@ def load_config():
 
 CFG = load_config()
 HERE = HOME_DIR
+MANUAL = os.path.join(HERE, "manual_order")
 os.makedirs(HERE, exist_ok=True)
 LOG, STATE = os.path.join(HERE, "memguard.log"), os.path.join(HERE, "paused.json")
 PAUSE_AVAIL, KILL_AVAIL, RESUME_AVAIL = (int(CFG[k] * GB) for k in ("pause_avail_gb", "kill_avail_gb", "resume_avail_gb"))
@@ -68,6 +79,8 @@ HEAVY, MIN_JOB = int(CFG["heavy_job_gb"] * GB), int(CFG["min_job_mb"]) << 20
 SECOND_OK, SECOND_PAUSE = int(CFG["second_ok_gb"] * GB), int(CFG["second_pause_gb"] * GB)
 SLOT2_AVAIL, SLOT3_AVAIL = int(CFG["slot2_avail_gb"] * GB), int(CFG["slot3_avail_gb"] * GB)
 MAX_HEAVY = int(CFG["max_heavy_jobs"])
+L2_RUN, L2_RESUME = int(CFG["level2_run_margin_gb"] * GB), int(CFG["level2_resume_margin_gb"] * GB)
+PRIORITY_RE = re.compile(CFG["priority_pattern"], re.I) if CFG["priority_pattern"] else None
 SESSION_RE = re.compile(CFG["session_pattern"])
 PROTECT = re.compile(CFG["protect_pattern"] + (("|" + CFG["protect_extra"]) if CFG["protect_extra"] else ""), re.I)
 HEADLESS = re.compile(CFG["headless_pattern"], re.I)
@@ -173,6 +186,36 @@ def read_rank():
     except OSError: pass
     return rank
 
+def should_pause_at_level(avail, lvl, n_live):
+    """Pressure level 2 pauses a job, except (level2_one_job) a single running job while available is comfortably above the pause line."""
+    if lvl < 2: return False
+    if not CFG["level2_one_job"]: return True
+    return avail < PAUSE_AVAIL + L2_RUN or n_live > 1
+
+def is_priority(label): return bool(PRIORITY_RE and PRIORITY_RE.search(label))
+
+def read_manual_order(path=None):
+    """manual_order: ticket file names (as in queue*/ and queue*_hold/), one per line; text after whitespace is just a label for humans."""
+    out = []
+    try:
+        for line in open(path or MANUAL):
+            line = line.strip()
+            if line and not line.startswith("#"): out.append(line.split()[0])
+    except OSError: pass
+    return out
+
+def apply_manual_order(normal, T, manual):
+    """Listed tickets swap among the positions they already hold in the rank order. Unlisted, unknown, duplicate, "0-" priority
+    and priority-pattern tickets keep their places, and new tickets still follow rank.txt."""
+    seen, movable = set(), []
+    for f in manual:
+        if f in seen or f not in normal or f.startswith("0-") or is_priority(T[f][1]): continue
+        seen.add(f); movable.append(f)
+    slots = sorted(normal.index(f) for f in movable)
+    out = list(normal)
+    for pos, f in zip(slots, movable): out[pos] = f
+    return out
+
 def main():
     try: paused = json.load(open(STATE))
     except Exception: paused = []
@@ -187,7 +230,7 @@ def main():
         paused = [p for p in paused if p["root"] != j["root"]]
         log(f"KILLED (available {g(avail)}, level {lvl}) pid {j['root']} {g(j['rss'])}: {j['cmd']}")
         notify(f"Stopped a {g(j['rss'])} background job to keep the Mac running")
-    elif (avail < PAUSE_AVAIL or lvl >= 2) and live:
+    elif (avail < PAUSE_AVAIL or should_pause_at_level(avail, lvl, len(live))) and live:
         j = live[0]; sig(j, signal.SIGSTOP); paused.append(j)
         log(f"PAUSED (available {g(avail)}, level {lvl}) pid {j['root']} {g(j['rss'])}: {j['cmd']}")
         notify(f"Paused a {g(j['rss'])} background job: memory low")
@@ -198,12 +241,16 @@ def main():
         for j in heavy[keep:]:
             sig(j, signal.SIGSTOP); paused.append(j)
             log(f"QUEUED (too many heavy jobs) pid {j['root']} {g(j['rss'])}: {j['cmd']}")
-        if paused and lvl == 1 and ((not heavy and avail > RESUME_AVAIL) or (len(heavy) < MAX_HEAVY and avail > SECOND_OK)):
+        if paused and lvl == 2 and not live and CFG["level2_one_job"] and avail > PAUSE_AVAIL + L2_RESUME:
+            # deadlock breaker: level 2 with nothing running would keep every job paused for good; smallest job first
+            j = min(paused, key=lambda j: j["rss"]); paused.remove(j); sig(j, signal.SIGCONT)
+            log(f"RESUMED one job at level 2 (available {g(avail)}) pid {j['root']}: {j['cmd']}")
+        elif paused and lvl == 1 and ((not heavy and avail > RESUME_AVAIL) or (len(heavy) < MAX_HEAVY and avail > SECOND_OK)):
             j = paused.pop(0); sig(j, signal.SIGCONT)
             log(f"RESUMED (available {g(avail)}) pid {j['root']}: {j['cmd']}")
     # STUCK rule: pausing keeps a job's memory, so a pile of paused jobs can hold the Mac below the resume line forever.
     # If memory has stayed low for stuck_seconds while jobs are paused, stop (TERM) the lowest-ranked paused job,
-    # one per stuck_interval. Jobs whose queue label contains "priority" are stopped last.
+    # one per stuck_interval. Jobs whose queue label matches priority_pattern are stopped last.
     stuck_f = os.path.join(HERE, "stuck.json")
     try: stuck = json.load(open(stuck_f))
     except Exception: stuck = {}
@@ -220,7 +267,7 @@ def main():
             rank = [f for f, _ in read_rank()]
             def badness(j):
                 lab = label_of(j).lower()
-                if "priority" in lab: return (0, 0)
+                if is_priority(lab): return (0, 0)
                 pos = next((i for i, f in enumerate(rank) if f in lab), len(rank))
                 return (1, pos)
             j = max(paused, key=lambda j: (badness(j), j["rss"]))
@@ -238,9 +285,9 @@ def main():
         json.dump(paused, open(STATE, "w"))
 
 # ---- dispatcher for the heavyrun queue ----
-# heavyrun waiters start when their ticket is listed in visible.txt (heavy lane) or is FIRST in the queue folder (light lane).
+# heavyrun waiters start when their ticket is listed in visible.txt (heavy lane) or visible_light.txt (light lane).
 # We keep only the next job(s) visible and park the rest in a "hold" folder (waiters keep waiting; nothing is killed).
-# Order: priority tickets (name starts "0-"), then rank.txt order, then first come first served.
+# Order: priority tickets (name starts "0-"), then rank.txt order (adjusted by manual_order), then first come first served.
 # Dead tickets (waiter gone) are removed so they can't block the queue.
 
 def disk_and_swap():
@@ -296,6 +343,7 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
             if frag in lab: return (2 if pk else 0, i, f)
         return (1, 0, f)
     normal = sorted([f for f in T if not f.startswith("0-")], key=score)
+    normal = apply_manual_order(normal, T, read_manual_order())
     prio = sorted(f for f in T if f.startswith("0-"))
     order = prio + normal
     if heavy_lane:   # memory-budget slots
@@ -323,6 +371,12 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
             os.replace(tmp, os.path.join(HERE, "visible.txt"))
     else:
         want_q = set(order[:1])
+        # heavyrun re-creates its own ticket when the dispatcher parks it, so "first name in the folder" would ignore rank.txt and
+        # manual_order. Light-lane waiters start only if named in visible_light.txt (heavyrun falls back to first-come if it is stale).
+        if not DRY:
+            tmp = os.path.join(HERE, "visible_light.txt.tmp")
+            with open(tmp, "w") as fh: fh.write("".join(f + "\n" for f in order[:1]))
+            os.replace(tmp, os.path.join(HERE, "visible_light.txt"))
     if DRY: return order
     stall_alert(T, want_q, heavy_lane)
     for f, (d, label) in T.items():

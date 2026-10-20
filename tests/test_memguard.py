@@ -1,5 +1,6 @@
 """Tests for memguard's dispatcher, job detection and the heavyrun queue wrapper. Run: python3 -m unittest discover -s tests -v"""
-import os, subprocess, sys, tempfile, time, unittest, importlib, shutil
+from unittest import mock
+import json, os, subprocess, sys, tempfile, time, unittest, importlib, shutil
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GB = 1 << 30
@@ -92,6 +93,137 @@ class DispatchTests(Base):
         lines = open(os.path.join(self.home, "stalled.txt")).read().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn("old: waited an hour", lines[0]); self.assertIn("disk/swap hold", lines[0])
+
+class ManualOrderTests(Base):
+    def T(self, *labels): return {f"t{i}": ("d", l) for i, l in enumerate(labels)}
+    def test_listed_tickets_swap_among_their_own_positions(self):
+        T = self.T("a", "b", "c", "d")
+        self.assertEqual(self.mg.apply_manual_order(["t0", "t1", "t2", "t3"], T, ["t3", "t1"]), ["t0", "t3", "t2", "t1"])
+    def test_full_reorder(self):
+        T = self.T("a", "b", "c")
+        self.assertEqual(self.mg.apply_manual_order(["t0", "t1", "t2"], T, ["t2", "t0", "t1"]), ["t2", "t0", "t1"])
+    def test_unknown_duplicate_zero_and_priority_label_are_ignored(self):
+        T = self.T("a", "Release PRIORITY: build", "c")
+        T["0-9-1"] = ("d", "urgent")
+        out = self.mg.apply_manual_order(["t0", "t1", "t2"], T, ["gone", "t2", "t2", "t1", "0-9-1", "t0"])
+        self.assertEqual(out, ["t2", "t1", "t0"])   # t1 matches priority_pattern and never moves; t2 and t0 swap
+    def test_priority_pattern_is_configurable(self):
+        self.mg.PRIORITY_RE = self.mg.re.compile("urgent-work", self.mg.re.I)
+        T = self.T("a", "urgent-work: x", "c")
+        self.assertEqual(self.mg.apply_manual_order(["t0", "t1", "t2"], T, ["t2", "t1", "t0"]), ["t2", "t1", "t0"])
+        self.mg.PRIORITY_RE = None   # empty pattern = no priority labels, so every ticket can move
+        self.assertEqual(self.mg.apply_manual_order(["t0", "t1"], self.T("a", "priority"), ["t1", "t0"]), ["t1", "t0"])
+    def test_empty_manual_changes_nothing(self):
+        self.assertEqual(self.mg.apply_manual_order(["t0", "t1"], self.T("a", "b"), []), ["t0", "t1"])
+    def test_read_comments_blank_lines_and_labels(self):
+        path = os.path.join(self.home, "manual_order")
+        open(path, "w").write("# comment\n\n111-5\tlabel one\n222-5  label two\n")
+        self.assertEqual(self.mg.read_manual_order(path), ["111-5", "222-5"])
+    def test_read_missing_file(self):
+        self.assertEqual(self.mg.read_manual_order(os.path.join(self.home, "nope")), [])
+    def test_dispatch_uses_manual_order_and_rank_for_the_rest(self):
+        a, b, c = self.ticket("1", "job a"), self.ticket("2", "job b"), self.ticket("3", "job c")
+        open(os.path.join(self.home, "manual_order"), "w").write(f"{c}\n{a}\n")
+        self.mg.dispatch()
+        self.assertEqual(self.visible(), [c])       # c and a swap places; b keeps the middle slot
+        open(os.path.join(self.home, "manual_order"), "w").write(f"{b}\n")
+        self.mg.dispatch()
+        self.assertEqual(self.visible(), [a])       # one listed ticket keeps its own place, so arrival order returns
+
+class LightLaneTests(Base):
+    def light(self, name, label):
+        p = subprocess.Popen(["sleep", "60"]); self.sleepers.append(p)
+        f = f"{name}-{p.pid}"
+        os.makedirs(os.path.join(self.home, "queue_light"), exist_ok=True)
+        open(os.path.join(self.home, "queue_light", f), "w").write(label)
+        return f
+    def test_dispatch_writes_visible_light_in_rank_order(self):
+        a, b = self.light("1", "[light] job a"), self.light("2", "[light] job b")
+        open(os.path.join(self.home, "rank.txt"), "w").write("job b\n")
+        self.mg.dispatch("queue_light", "queue_light_hold", heavy_lane=False)
+        self.assertEqual(open(os.path.join(self.home, "visible_light.txt")).read().split(), [b])
+        self.assertEqual(os.listdir(os.path.join(self.home, "queue_light")), [b])
+        self.assertEqual(os.listdir(os.path.join(self.home, "queue_light_hold")), [a])
+    def test_dry_run_writes_nothing(self):
+        self.light("1", "[light] job a"); self.mg.DRY = True
+        try: self.mg.dispatch("queue_light", "queue_light_hold", heavy_lane=False)
+        finally: self.mg.DRY = False
+        self.assertFalse(os.path.exists(os.path.join(self.home, "visible_light.txt")))
+    def run_light(self, env_extra=None, wait=3):
+        env = dict(os.environ, MEMGUARD_HOME=self.home, LIGHT_MIN_FREE="0", HEAVY_LIGHT="1")
+        p = subprocess.Popen([os.path.join(ROOT, "heavyrun"), "test: light", "true"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.sleepers.append(p)
+        try: p.wait(timeout=wait)
+        except subprocess.TimeoutExpired: pass
+        return p.poll()
+    def test_light_waiter_starts_at_once_when_alone(self):
+        open(os.path.join(self.home, "visible_light.txt"), "w").write("")   # fresh list, nothing named
+        self.assertEqual(self.run_light(), 0)
+    def test_light_waiter_waits_when_another_is_ahead_and_it_is_not_listed(self):
+        open(os.path.join(self.home, "visible_light.txt"), "w").write("someone-else\n")
+        self.light("1", "[light] other waiting job")
+        self.assertIsNone(self.run_light())          # still waiting after 3 s: the dispatcher did not name it
+    def test_light_waiter_falls_back_to_first_come_without_a_fresh_list(self):
+        self.assertEqual(self.run_light(), 0)
+
+class Level2Tests(Base):
+    """main() at macOS pressure level 2 with the process table and memory faked."""
+    def job(self, root, rss, cmd="python3 job.py", etime="05:00"):
+        return dict(root=root, pids=[root], rss=rss, cmd=cmd, etime=etime)
+    def run_main(self, avail, lvl, jobs, paused=()):
+        self.signals = []
+        P = {j["root"]: dict(pid=j["root"], ppid=1, rss=j["rss"], state="S", etime="05:00", cmd=j["cmd"]) for j in list(jobs) + list(paused)}
+        json.dump(list(paused), open(os.path.join(self.home, "paused.json"), "w"))
+        self.mg.procs = lambda: P
+        self.mg.mem = lambda: (avail, lvl)
+        self.mg.session_jobs = lambda P_: list(jobs) + list(paused)
+        self.mg.sig = lambda job, s: self.signals.append((job["root"], s))
+        self.mg.main()
+        return json.load(open(os.path.join(self.home, "paused.json")))
+    def test_one_job_keeps_running_at_level_2_with_memory_to_spare(self):
+        state = self.run_main(8 * GB, 2, [self.job(10, 2 * GB)])
+        self.assertEqual(state, []); self.assertEqual(self.signals, [])
+    def test_level_2_pauses_when_close_to_the_pause_line(self):
+        state = self.run_main(6.5 * GB, 2, [self.job(10, 2 * GB)])
+        self.assertEqual([j["root"] for j in state], [10])
+    def test_level_2_with_two_running_jobs_pauses_the_biggest(self):
+        state = self.run_main(9 * GB, 2, [self.job(10, 2 * GB), self.job(11, 3 * GB)])
+        self.assertEqual([j["root"] for j in state], [11])
+    def test_level_2_pauses_below_pause_line_regardless(self):
+        state = self.run_main(5 * GB, 1, [self.job(10, 2 * GB)])
+        self.assertEqual([j["root"] for j in state], [10])
+    def test_option_off_restores_pause_on_any_level_2(self):
+        self.mg.CFG["level2_one_job"] = False
+        state = self.run_main(12 * GB, 2, [self.job(10, 2 * GB)])
+        self.assertEqual([j["root"] for j in state], [10])
+    def test_deadlock_breaker_resumes_smallest_paused_job(self):
+        import signal
+        state = self.run_main(9 * GB, 2, [], paused=[self.job(10, 3 * GB), self.job(11, 1 * GB)])
+        self.assertEqual([j["root"] for j in state], [10])
+        self.assertEqual(self.signals, [(11, signal.SIGCONT)])
+    def test_deadlock_breaker_needs_the_extra_margin(self):
+        state = self.run_main(7.5 * GB, 2, [], paused=[self.job(10, 3 * GB)])
+        self.assertEqual([j["root"] for j in state], [10]); self.assertEqual(self.signals, [])
+    def test_deadlock_breaker_waits_while_a_job_is_running(self):
+        state = self.run_main(9 * GB, 2, [self.job(20, 2 * GB)], paused=[self.job(10, 3 * GB)])
+        self.assertEqual([j["root"] for j in state], [10]); self.assertEqual(self.signals, [])
+
+class StuckRuleTests(Base):
+    def test_priority_label_is_stopped_last_and_pattern_is_configurable(self):
+        import signal
+        self.mg.PRIORITY_RE = self.mg.re.compile("release", self.mg.re.I)
+        paused = [dict(root=10, pids=[10], rss=1 * GB, cmd="a", etime="01:00"), dict(root=11, pids=[11], rss=3 * GB, cmd="b", etime="01:00")]
+        P = {10: dict(pid=10, ppid=100, rss=GB, state="S", etime="01:00", cmd="a"), 11: dict(pid=11, ppid=101, rss=3 * GB, state="S", etime="01:00", cmd="b"),
+             100: dict(pid=100, ppid=1, rss=1, state="S", etime="01:00", cmd="/bin/bash /x/heavyrun release: ship"),
+             101: dict(pid=101, ppid=1, rss=1, state="S", etime="01:00", cmd="/bin/bash /x/heavyrun docs: render")}
+        json.dump(paused, open(os.path.join(self.home, "paused.json"), "w"))
+        json.dump({"since": time.time() - 3600}, open(os.path.join(self.home, "stuck.json"), "w"))
+        sent = []
+        self.mg.procs = lambda: P; self.mg.mem = lambda: (4 * GB, 1); self.mg.session_jobs = lambda P_: []
+        self.mg.sig = lambda job, s: sent.append((job["root"], s))
+        with mock.patch.object(self.mg.time, "sleep"): self.mg.main()
+        self.assertIn((11, signal.SIGTERM), sent)         # the bigger, non-priority job goes first even though 10 is smaller
+        self.assertNotIn((10, signal.SIGTERM), sent)
 
 class JobDetectionTests(Base):
     def proc(self, pid, ppid, cmd, rss=2 * GB):

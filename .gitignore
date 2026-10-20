@@ -8,3 +8,7 @@ queue*/
 *.lock
 heavy.slot*
 hold_disk_swap
+visible_light.txt
+stalled.txt
+stalled_seen.txt
+manual_order

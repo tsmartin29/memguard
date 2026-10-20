@@ -32,7 +32,12 @@ allowed(){   # may this ticket start now?
   if [ "$LIGHT" = 0 ] && [ -f "$G/visible.txt" ] && [ $(( $(date +%s) - $(stat -f %m "$G/visible.txt") )) -lt 90 ]; then
     grep -qx "$name" "$G/visible.txt"; return
   fi
-  [ "$(ls "$Q" | sort | head -1)" = "$name" ]   # no fresh dispatcher list (or light lane): first come, first served
+  if [ "$LIGHT" = 1 ] && [ -f "$G/visible_light.txt" ] && [ $(( $(date +%s) - $(stat -f %m "$G/visible_light.txt") )) -lt 90 ]; then
+    # The light lane follows the dispatcher too (rank.txt, manual_order). Nobody else waiting = start at once, don't wait for the next dispatch.
+    grep -qx "$name" "$G/visible_light.txt" && return 0
+    [ "$(ls "$Q" "$G/queue_light_hold" 2>/dev/null | grep -v ':$' | grep -vx "$name" | grep -c .)" = 0 ]; return
+  fi
+  [ "$(ls "$Q" | sort | head -1)" = "$name" ]   # no fresh dispatcher list: first come, first served
 }
 while :; do
   # a full disk can stop the ticket from being written; rewrite it if missing.
