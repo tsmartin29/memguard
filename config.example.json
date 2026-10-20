@@ -1,0 +1,22 @@
+{
+  "pause_avail_gb": 6,
+  "kill_avail_gb": 3,
+  "resume_avail_gb": 9,
+  "heavy_job_gb": 1.5,
+  "min_job_mb": 300,
+  "second_ok_gb": 10,
+  "second_pause_gb": 7,
+  "slot2_avail_gb": 10,
+  "slot3_avail_gb": 14,
+  "max_heavy_jobs": 3,
+  "disk_hold_gb": 6.5,
+  "swap_hold_gb": 6,
+  "disk_path": "~",
+  "stuck_seconds": 300,
+  "stuck_interval_seconds": 60,
+  "session_pattern": "(claude-code/[^ ]*/claude|\\.local/share/claude/versions/[^ ]+|/bin/claude)( |$)",
+  "protect_pattern": "(Claude\\.app|WindowServer|Google Chrome|Safari|Firefox|Finder|loginwindow|launchd|kernel_task|Dock|SystemUIServer|memguard)",
+  "protect_extra": "",
+  "headless_pattern": "--headless|for Testing|puppeteer|playwright",
+  "notify": true
+}

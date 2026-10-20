@@ -1,0 +1,10 @@
+__pycache__/
+*.log
+*.log.1
+paused.json
+stuck.json
+visible.txt
+queue*/
+*.lock
+heavy.slot*
+hold_disk_swap

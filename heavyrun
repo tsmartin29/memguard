@@ -1,0 +1,59 @@
+#!/bin/bash
+# heavyrun <label> <command...>
+# Run a heavy job through the machine-wide queue so big jobs don't pile up and crash the Mac.
+#
+# HEAVY lane (default): up to 3 jobs at once. memguard's dispatcher decides how many may run from available memory and in
+#   what order (priority tickets, then rank.txt, then first come), and lists the tickets allowed to start in visible.txt.
+#   Needs >= HEAVY_MIN_FREE (default 30) percent free memory to start.
+# HEAVY_LIGHT=1  = LIGHT lane for short, small jobs (under ~15 min and ~1.5 GB: one build, a quick test). One at a time,
+#   own queue and lock, needs >= LIGHT_MIN_FREE (default 40) percent free. If the light job runs past 15 minutes a second
+#   light slot opens so short jobs don't wait behind it.
+# HEAVY_PRIORITY=1 = front of the queue (use sparingly).
+# Commands run with `nice -n 15`. Jobs can read $HEAVY_WORKERS (1, or 4 when the top slot has >= 60 % free memory).
+# State and log live in $MEMGUARD_HOME (default ~/.config/memguard); log: heavy_queue.log
+set -u
+G="${MEMGUARD_HOME:-$HOME/.config/memguard}"; LOG="$G/heavy_queue.log"; Q="$G/queue"; MINFREE="${HEAVY_MIN_FREE:-30}"; LIGHT=0
+mkdir -p "$G"
+SLOTS="$G/heavy.lock $G/heavy.slot2 $G/heavy.slot3"
+if [ "${HEAVY_LIGHT:-0}" = 1 ]; then LIGHT=1; SLOTS="$G/light.lock $G/light.slot2"; Q="$G/queue_light"; MINFREE="${LIGHT_MIN_FREE:-40}"; fi; mkdir -p "$Q"
+# Light lane = SHORT jobs (< ~15 min, < 1.5 GB). If the job in light.lock has run > 15 min it is really a big job in the wrong lane,
+# so a second light slot opens and short jobs don't wait behind it.
+light_slot_ok(){ [ "$1" != "$G/light.slot2" ] && return 0; [ -d "$G/light.lock" ] || return 1; [ $(( $(date +%s) - $(stat -f %m "$G/light.lock") )) -gt 900 ]; }
+label="$1"; shift; [ "$LIGHT" = 1 ] && label="[light] $label"
+pfx=""; [ "${HEAVY_PRIORITY:-0}" = 1 ] && pfx="0-"; ms="$(perl -MTime::HiRes=time -e 'printf("%d", time*1000)' 2>/dev/null || echo "$(date +%s)000")"; name="${pfx}${ms}-$$"; ticket="$Q/$name"; echo "$label" > "$ticket"
+LOCK=""
+log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
+cleanup(){ rm -f "$ticket" "$G/queue_hold/$name" "$G/queue_light_hold/$name"; [ -n "$LOCK" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK"; }
+trap cleanup EXIT
+trap 'cleanup; exit 143' INT TERM
+log "QUEUED  $label (pid $$)"
+free_pct(){ memory_pressure | awk -F': ' '/free percentage/{gsub("%","",$2); print $2+0}'; }
+allowed(){   # may this ticket start now?
+  if [ "$LIGHT" = 0 ] && [ -f "$G/visible.txt" ] && [ $(( $(date +%s) - $(stat -f %m "$G/visible.txt") )) -lt 90 ]; then
+    grep -qx "$name" "$G/visible.txt"; return
+  fi
+  [ "$(ls "$Q" | sort | head -1)" = "$name" ]   # no fresh dispatcher list (or light lane): first come, first served
+}
+while :; do
+  # a full disk can stop the ticket from being written; rewrite it if missing.
+  [ -e "$ticket" ] || echo "$label" > "$ticket" 2>/dev/null
+  for s in $SLOTS; do   # stale slot (holder died)
+    if [ -d "$s" ] && ! kill -0 "$(cat "$s/pid" 2>/dev/null)" 2>/dev/null; then rm -rf "$s"; fi
+  done
+  if [ -e "$ticket" ] && allowed && [ "$(free_pct)" -ge "$MINFREE" ]; then
+    for s in $SLOTS; do
+      if [ "$LIGHT" = 1 ] && ! light_slot_ok "$s"; then continue; fi
+      if mkdir "$s" 2>/dev/null; then LOCK="$s"; echo $$ > "$s/pid"; echo "$label" > "$s/label"; break; fi
+    done
+    [ -n "$LOCK" ] && break
+  fi
+  sleep 15
+done
+rm -f "$ticket"; t0=$(date +%s)
+# The top job (first slot) may use more cores when memory is plentiful; jobs that support it read HEAVY_WORKERS (default 1).
+export HEAVY_WORKERS=1
+if [ "$LIGHT" = 0 ] && [ "$(basename "$LOCK")" = heavy.lock ] && [ "$(free_pct)" -ge 60 ]; then export HEAVY_WORKERS=4; fi
+log "START   $label (pid $$, $(basename "$LOCK"), workers $HEAVY_WORKERS)"
+nice -n 15 "$@"; rc=$?
+log "DONE    $label rc=$rc after $(( ($(date +%s)-t0)/60 )) min"
+exit $rc

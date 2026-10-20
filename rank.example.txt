@@ -1,0 +1,8 @@
+# rank.txt: order for queued jobs (heavy and light lanes). One fragment per line; the first line that appears
+# anywhere in a job's label wins. Unlisted jobs run after the listed ones, first come first served.
+# A line containing only PARK sends everything below it to the very back.
+# Example (labels are whatever you pass to heavyrun: "<session>: <job>"):
+release-build
+nightly-report
+PARK
+experiments
