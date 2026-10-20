@@ -13,6 +13,7 @@ class Base(unittest.TestCase):
         self.mg = importlib.import_module("memguard")
         self.mg.mem = lambda: (self.avail, 1)
         self.mg.disk_and_swap = lambda: (self.disk, self.swap)
+        self.mg.CFG["notify"] = False   # no real Mac notifications during tests
         self.avail, self.disk, self.swap = 5 * GB, 100 * GB, 0
         self.sleepers = []
     def tearDown(self):
@@ -69,6 +70,28 @@ class DispatchTests(Base):
         self.ticket("1000", "a"); self.swap = 8 * GB
         self.mg.dispatch()
         self.assertEqual(self.visible(), [])
+
+    def test_old_swap_with_plenty_of_memory_does_not_hold(self):
+        a = self.ticket("1000", "a"); self.swap = 8 * GB; self.avail = 15 * GB
+        self.mg.dispatch()
+        self.assertIn(a, self.visible())
+        self.assertFalse(os.path.exists(os.path.join(self.home, "hold_disk_swap")))
+
+    def test_very_high_swap_holds_even_with_memory(self):
+        self.ticket("1000", "a"); self.swap = 11 * GB; self.avail = 15 * GB
+        self.mg.dispatch()
+        self.assertEqual(self.visible(), [])
+
+    def test_stall_alert_once_for_old_ticket_only(self):
+        now = time.time_ns()
+        self.ticket(str(now - 10 * 60 * 10**9), "first: runs")
+        old = self.ticket(str(now - 60 * 60 * 10**9 + 1), "old: waited an hour")
+        new = self.ticket(str(now), "new: just queued")
+        self.disk = 2 * GB                  # hold: nothing runs
+        self.mg.dispatch(); self.mg.dispatch()
+        lines = open(os.path.join(self.home, "stalled.txt")).read().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("old: waited an hour", lines[0]); self.assertIn("disk/swap hold", lines[0])
 
 class JobDetectionTests(Base):
     def proc(self, pid, ppid, cmd, rss=2 * GB):

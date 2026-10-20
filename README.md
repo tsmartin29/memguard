@@ -12,7 +12,7 @@ Run 20-30 Claude Code sessions on a 24 GB laptop and sooner or later two of them
 
 | File | What it does |
 |---|---|
-| `memguard.py` | The guard. One pass per run (launchd runs it every 15 s). Pauses (`SIGSTOP`) the biggest session job when available memory is low, kills it when memory is critical, resumes jobs one by one when memory recovers, stops the lowest-ranked paused job if memory stays low too long, holds new heavy jobs when swap is high or the disk is nearly full, and dispatches the `heavyrun` queue. |
+| `memguard.py` | The guard. One pass per run (launchd runs it every 15 s). Pauses (`SIGSTOP`) the biggest session job when available memory is low, kills it when memory is critical, resumes jobs one by one when memory recovers, stops the lowest-ranked paused job if memory stays low too long, holds new heavy jobs when the disk is nearly full or swap is high while memory is short, alerts you once when a queued job has waited too long, and dispatches the `heavyrun` queue. |
 | `heavyrun` | Wrapper agents use to run heavy work: `heavyrun "<session>: <job>" <command...>`. Up to 3 jobs at once (memory permitting) plus a light lane for short small jobs. Runs commands with `nice -n 15`. |
 | `config.example.json` | Every threshold and pattern, with defaults for a 24 GB Mac. |
 | `rank.example.txt` | Optional job order, plus a `PARK` section for jobs that should always go last. |

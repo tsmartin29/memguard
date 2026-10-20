@@ -36,7 +36,11 @@ DEFAULTS = {
     "second_ok_gb": 10, "second_pause_gb": 7,    # extra heavy jobs resume above / are paused below
     "slot2_avail_gb": 10, "slot3_avail_gb": 14,  # the 2nd / 3rd heavy job may start at this much available memory
     "max_heavy_jobs": 3,          # at most this many heavy jobs keep running (heavyrun has 3 slots)
-    "disk_hold_gb": 6.5, "swap_hold_gb": 6,      # no NEW heavy job while disk free < or swap used > these
+    "disk_hold_gb": 6.5,          # no NEW heavy job while disk free is below this
+    # Swap: macOS keeps old swap long after memory pressure is gone, so swap alone would hold jobs for hours.
+    # Hold only when swap is above swap_hard_gb, or above swap_hold_gb while available memory is under swap_low_avail_gb.
+    "swap_hold_gb": 6, "swap_low_avail_gb": 8, "swap_hard_gb": 10,
+    "stall_alert_minutes": 45,    # one notification (and a line in stalled.txt) when a queued job waits this long; 0 = off
     "disk_path": "~",             # which disk to watch
     "stuck_seconds": 300, "stuck_interval_seconds": 60,
     # regexes matched against the full command line
@@ -248,6 +252,27 @@ def disk_and_swap():
         return disk_free, swap_used
     except Exception: return 99 * GB, 0
 
+def stall_alert(T, want_q, heavy_lane):
+    """One notification per ticket that has waited longer than stall_alert_minutes, with the reason; also appended to stalled.txt."""
+    mins = CFG.get("stall_alert_minutes", 45)
+    if not mins: return
+    try:
+        seen_p = os.path.join(HERE, "stalled_seen.txt")
+        seen = set(open(seen_p).read().split()) if os.path.exists(seen_p) else set()
+        held = heavy_lane and os.path.exists(os.path.join(HERE, "hold_disk_swap"))
+        for f, (d, label) in T.items():
+            if f in want_q or f in seen: continue
+            try: waited = time.time() - int(f.split("-")[-2]) / 1e9   # ticket names start with a nanosecond timestamp
+            except (ValueError, IndexError): continue
+            if waited < mins * 60: continue
+            why = "disk/swap hold" if held else "waiting for a free slot"
+            with open(os.path.join(HERE, "stalled.txt"), "a") as fh:
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M')} STALLED {int(waited // 60)} min ({why}): {label}\n")
+            notify(f"Job waiting {int(waited // 60)} min ({why}): {label[:60]}")
+            seen.add(f)
+        with open(seen_p, "w") as fh: fh.write("\n".join(sorted(seen)))
+    except Exception as e: log(f"stall alert error: {e!r}")
+
 def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
     Q, H = os.path.join(HERE, lane), os.path.join(HERE, hold); os.makedirs(Q, exist_ok=True); os.makedirs(H, exist_ok=True)
     rank = read_rank()
@@ -280,7 +305,8 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
         # No NEW heavy job starts while the disk is nearly full or swap use is high.
         disk_free, swap_used = disk_and_swap()
         hold_f = os.path.join(HERE, "hold_disk_swap")
-        if disk_free < CFG["disk_hold_gb"] * GB or swap_used > CFG["swap_hold_gb"] * GB:
+        swap_bad = swap_used > CFG["swap_hard_gb"] * GB or (swap_used > CFG["swap_hold_gb"] * GB and avail < CFG["swap_low_avail_gb"] * GB)
+        if disk_free < CFG["disk_hold_gb"] * GB or swap_bad:
             allowed = 0
             if not os.path.exists(hold_f) and not DRY:
                 open(hold_f, "w").write(time.ctime())
@@ -298,6 +324,7 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
     else:
         want_q = set(order[:1])
     if DRY: return order
+    stall_alert(T, want_q, heavy_lane)
     for f, (d, label) in T.items():
         dest = Q if f in want_q else H
         if d != dest:

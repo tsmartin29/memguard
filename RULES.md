@@ -18,7 +18,7 @@ Numbers assume a 24 GB Mac; scale them to yours and match them to `config.json`.
 6. Browser recordings and screen captures (headless Chrome, puppeteer, playwright) are heavy-lane jobs, never light.
 7. The guard (memguard, every 15 s) pauses session jobs when memory runs low, resumes them later, and kills the biggest one
    if memory is critical. If your job seems frozen, read `~/.config/memguard/memguard.log`. Do not restart it.
-8. No NEW heavy job starts while the disk is nearly full or swap is high. Swap lives on the same disk, so a full disk is a crash.
+8. No NEW heavy job starts while the disk is nearly full, or while swap is high AND memory is short. Swap lives on the same disk, so a full disk is a crash. (Swap alone is not enough: macOS keeps old swap long after the pressure is gone.)
    Clean your scratch and build folders as you go (move them to the Trash).
 9. Do not open more sessions just to run more heavy work in parallel. Queue it.
 10. Want a different place in line? Ask whoever owns `rank.txt` (one fragment of a job label per line).
