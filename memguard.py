@@ -47,6 +47,11 @@ DEFAULTS = {
     # last running job (needs available > pause_avail_gb + level2_run_margin_gb), and if everything is paused at level 2 the
     # smallest paused job is resumed once available > pause_avail_gb + level2_resume_margin_gb. False = pause on any level 2.
     "level2_one_job": True, "level2_run_margin_gb": 1, "level2_resume_margin_gb": 2,
+    # With level2_one_job, a SECOND job may also keep running at level 2 while available memory is at least this (0 = off).
+    "level2_two_jobs_gb": 8,
+    # Jobs started under a heavyrun ticket whose label matches priority_pattern are not paused by pressure level 2;
+    # they are paused only when available memory drops under pause_avail_gb (and killed under kill_avail_gb).
+    "protect_priority_jobs": True,
     # Jobs whose queue label matches this regex (case-insensitive) are stopped last by the stuck rule and are never moved by manual_order.
     # Empty string = no priority labels.
     "priority_pattern": "priority",
@@ -190,9 +195,19 @@ def should_pause_at_level(avail, lvl, n_live):
     """Pressure level 2 pauses a job, except (level2_one_job) a single running job while available is comfortably above the pause line."""
     if lvl < 2: return False
     if not CFG["level2_one_job"]: return True
-    return avail < PAUSE_AVAIL + L2_RUN or n_live > 1
+    two = CFG.get("level2_two_jobs_gb", 0)
+    limit = 2 if two and avail >= two * GB else 1
+    return avail < PAUSE_AVAIL + L2_RUN or n_live > limit
 
 def is_priority(label): return bool(PRIORITY_RE and PRIORITY_RE.search(label))
+
+def under_priority_ticket(j, P):
+    """True when the job was started by a heavyrun ticket whose command line (label) matches priority_pattern."""
+    a, n = P.get(j["root"]), 0
+    while a and n < 40:
+        if is_heavyrun(a): return is_priority(a["cmd"])
+        a, n = P.get(a["ppid"]), n + 1
+    return False
 
 def read_manual_order(path=None):
     """manual_order: ticket file names (as in queue*/ and queue*_hold/), one per line; text after whitespace is just a label for humans."""
@@ -216,6 +231,11 @@ def apply_manual_order(normal, T, manual):
     for pos, f in zip(slots, movable): out[pos] = f
     return out
 
+def pausable_jobs(live, P, avail):
+    """Jobs the pause rules may stop: everything below pause_avail_gb, otherwise all but protected priority jobs."""
+    if avail < PAUSE_AVAIL or not CFG.get("protect_priority_jobs", True): return live
+    return [j for j in live if not under_priority_ticket(j, P)]
+
 def main():
     try: paused = json.load(open(STATE))
     except Exception: paused = []
@@ -230,8 +250,8 @@ def main():
         paused = [p for p in paused if p["root"] != j["root"]]
         log(f"KILLED (available {g(avail)}, level {lvl}) pid {j['root']} {g(j['rss'])}: {j['cmd']}")
         notify(f"Stopped a {g(j['rss'])} background job to keep the Mac running")
-    elif (avail < PAUSE_AVAIL or should_pause_at_level(avail, lvl, len(live))) and live:
-        j = live[0]; sig(j, signal.SIGSTOP); paused.append(j)
+    elif (avail < PAUSE_AVAIL or should_pause_at_level(avail, lvl, len(live))) and pausable_jobs(live, P, avail):
+        j = pausable_jobs(live, P, avail)[0]; sig(j, signal.SIGSTOP); paused.append(j)
         log(f"PAUSED (available {g(avail)}, level {lvl}) pid {j['root']} {g(j['rss'])}: {j['cmd']}")
         notify(f"Paused a {g(j['rss'])} background job: memory low")
     else:

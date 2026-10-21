@@ -187,11 +187,29 @@ class Level2Tests(Base):
         state = self.run_main(6.5 * GB, 2, [self.job(10, 2 * GB)])
         self.assertEqual([j["root"] for j in state], [10])
     def test_level_2_with_two_running_jobs_pauses_the_biggest(self):
+        self.mg.CFG["level2_two_jobs_gb"] = 0
         state = self.run_main(9 * GB, 2, [self.job(10, 2 * GB), self.job(11, 3 * GB)])
         self.assertEqual([j["root"] for j in state], [11])
     def test_level_2_pauses_below_pause_line_regardless(self):
         state = self.run_main(5 * GB, 1, [self.job(10, 2 * GB)])
         self.assertEqual([j["root"] for j in state], [10])
+    def test_level_2_two_jobs_keep_running_with_enough_memory(self):
+        state = self.run_main(9 * GB, 2, [self.job(10, 2 * GB), self.job(11, 3 * GB)])
+        self.assertEqual(state, []); self.assertEqual(self.signals, [])
+    def test_level_2_two_jobs_pause_one_below_the_two_job_line(self):
+        state = self.run_main(7.5 * GB, 2, [self.job(10, 2 * GB), self.job(11, 3 * GB)])
+        self.assertEqual([j["root"] for j in state], [11])
+    def test_priority_ticket_job_is_not_pausable_above_pause_line(self):
+        P = {1: dict(pid=1, ppid=0, rss=0, state="S", etime="1", cmd="launchd"),
+             5: dict(pid=5, ppid=1, rss=0, state="S", etime="1", cmd="/bin/bash /x/heavyrun PRIORITY: training python t.py"),
+             6: dict(pid=6, ppid=5, rss=3 * GB, state="S", etime="1", cmd="python t.py"),
+             7: dict(pid=7, ppid=1, rss=0, state="S", etime="1", cmd="/bin/bash /x/heavyrun render python r.py"),
+             8: dict(pid=8, ppid=7, rss=2 * GB, state="S", etime="1", cmd="python r.py")}
+        live = [dict(root=6, rss=3 * GB, cmd="python t.py"), dict(root=8, rss=2 * GB, cmd="python r.py")]
+        self.assertEqual([j["root"] for j in self.mg.pausable_jobs(live, P, 9 * GB)], [8])
+        self.assertEqual([j["root"] for j in self.mg.pausable_jobs(live, P, 5 * GB)], [6, 8])
+        self.mg.CFG["protect_priority_jobs"] = False
+        self.assertEqual([j["root"] for j in self.mg.pausable_jobs(live, P, 9 * GB)], [6, 8])
     def test_option_off_restores_pause_on_any_level_2(self):
         self.mg.CFG["level2_one_job"] = False
         state = self.run_main(12 * GB, 2, [self.job(10, 2 * GB)])

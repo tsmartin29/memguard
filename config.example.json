@@ -14,6 +14,8 @@
   "swap_low_avail_gb": 8,
   "swap_hard_gb": 10,
   "level2_one_job": true,
+  "level2_two_jobs_gb": 8,
+  "protect_priority_jobs": true,
   "level2_run_margin_gb": 1,
   "level2_resume_margin_gb": 2,
   "priority_pattern": "priority",
