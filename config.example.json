@@ -19,6 +19,7 @@
   "level2_run_margin_gb": 1,
   "level2_resume_margin_gb": 2,
   "priority_pattern": "priority",
+  "timing_max_wait_minutes": 20,
   "stall_alert_minutes": 45,
   "disk_path": "~",
   "stuck_seconds": 300,

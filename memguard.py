@@ -19,6 +19,7 @@ It only touches processes STARTED BY an agent session (some ancestor matches `se
 It also acts as the dispatcher for the `heavyrun` queue: it decides which queued jobs may start next
 (priority tickets, then rank.txt order, then first come first served) and holds all new heavy jobs while
 swap is high or the disk is nearly full. An optional manual_order file lets a UI drag-and-drop re-rank the queue.
+Timing lane: `HEAVY_TIMING=1 heavyrun ...` opens a quiet window (no new job starts) so a benchmark runs on a quiet machine.
 
 Config: $MEMGUARD_CONFIG, else $MEMGUARD_HOME/config.json (default home: ~/.config/memguard). See config.example.json.
 Usage:  memguard.py            one pass (this is what launchd runs)
@@ -55,6 +56,8 @@ DEFAULTS = {
     # Jobs whose queue label matches this regex (case-insensitive) are stopped last by the stuck rule and are never moved by manual_order.
     # Empty string = no priority labels.
     "priority_pattern": "priority",
+    # Timing lane (HEAVY_TIMING=1 heavyrun ...): the longest a timing job waits for the other running jobs to finish before it starts anyway.
+    "timing_max_wait_minutes": 20,
     "stall_alert_minutes": 45,    # one notification (and a line in stalled.txt) when a queued job waits this long; 0 = off
     "disk_path": "~",             # which disk to watch
     "stuck_seconds": 300, "stuck_interval_seconds": 60,
@@ -319,6 +322,11 @@ def disk_and_swap():
         return disk_free, swap_used
     except Exception: return 99 * GB, 0
 
+def ticket_time(name):
+    """Seconds since the epoch encoded in a ticket name ("<stamp>-<pid>" or "0-<stamp>-<pid>"); the stamp may be s, ms or ns."""
+    v = int(name.split("-")[-2])
+    return v / 1e9 if v > 1e17 else v / 1e3 if v > 1e11 else float(v)
+
 def stall_alert(T, want_q, heavy_lane):
     """One notification per ticket that has waited longer than stall_alert_minutes, with the reason; also appended to stalled.txt."""
     mins = CFG.get("stall_alert_minutes", 45)
@@ -329,16 +337,93 @@ def stall_alert(T, want_q, heavy_lane):
         held = heavy_lane and os.path.exists(os.path.join(HERE, "hold_disk_swap"))
         for f, (d, label) in T.items():
             if f in want_q or f in seen: continue
-            try: waited = time.time() - int(f.split("-")[-2]) / 1e9   # ticket names start with a nanosecond timestamp
+            try: waited = time.time() - ticket_time(f)   # ticket names start with a timestamp
             except (ValueError, IndexError): continue
             if waited < mins * 60: continue
-            why = "disk/swap hold" if held else "waiting for a free slot"
+            why = "disk/swap hold" if held else "timing quiet window" if TIMING_HOLD else "waiting for a free slot"
             with open(os.path.join(HERE, "stalled.txt"), "a") as fh:
                 fh.write(f"{time.strftime('%Y-%m-%d %H:%M')} STALLED {int(waited // 60)} min ({why}): {label}\n")
             notify(f"Job waiting {int(waited // 60)} min ({why}): {label[:60]}")
             seen.add(f)
         with open(seen_p, "w") as fh: fh.write("\n".join(sorted(seen)))
     except Exception as e: log(f"stall alert error: {e!r}")
+
+# ---- timing lane ----
+# A benchmark or latency measurement means little if other jobs are loading the machine. `HEAVY_TIMING=1 heavyrun ...` labels the
+# ticket "[timing]" (or "[timing max-wait Nm]"). When a timing ticket is next in line the dispatcher opens a QUIET WINDOW: no NEW
+# heavy or light job starts (running ones are never paused or killed) until the other running jobs finish or the max wait
+# (timing_max_wait_minutes) passes; then the timing job starts and new starts stay held until it ends. Jobs whose label matches
+# priority_pattern are never held. Memory, disk and swap gates still apply to the timing job like to any other.
+# State: timing_window.json (the window), timing_hold (fresh while new starts are held; heavyrun's light lane reads it).
+TIMING_RE = re.compile(r"\[timing(?: max-wait (\d+)m)?\]", re.I)
+TIMING_HOLD = ""   # set by the heavy-lane dispatch, read by the light-lane dispatch in the same run
+SLOT_DIRS = ("heavy.lock", "heavy.slot2", "heavy.slot3", "light.lock", "light.slot2")
+def is_timing(label): return bool(TIMING_RE.search(label))
+
+def running_labels():
+    """Queue labels of the jobs holding a heavyrun slot right now (both lanes)."""
+    out = []
+    for s in SLOT_DIRS:
+        p = os.path.join(HERE, s)
+        if not os.path.isdir(p): continue
+        try: os.kill(int(open(os.path.join(p, "pid")).read().strip()), 0)
+        except (OSError, ValueError) as e:
+            if not isinstance(e, PermissionError): continue   # holder gone (heavyrun clears the stale slot itself)
+        try:
+            with open(os.path.join(p, "label")) as fh: out.append(fh.read().strip())
+        except OSError: out.append("")
+    return out
+
+def timing_gate(order, T, free):
+    """Heavy lane: which tickets may start now (at most `free`). Sets TIMING_HOLD for the light lane and writes the timing_hold file."""
+    global TIMING_HOLD
+    st_f, hold_f = os.path.join(HERE, "timing_window.json"), os.path.join(HERE, "timing_hold")
+    try: st = json.load(open(st_f))
+    except Exception: st = {}
+    lab = lambda f: T[f][1]
+    prio = [f for f in order if is_priority(lab(f))]
+    run = running_labels()
+    run_t = [l for l in run if is_timing(l)]
+    others = [l for l in run if not is_priority(l) and not is_timing(l)]
+    nc = [f for f in order if not is_priority(lab(f))]
+    nxt = nc[0] if nc and is_timing(lab(nc[0])) else None
+    now, new, hold = time.time(), {}, ""
+    if run_t:
+        start = prio[:free]; hold = f"timing job running: {run_t[0]}"
+        new = dict(phase="running", label=run_t[0])
+        if st.get("phase") != "running" or st.get("label") != run_t[0]:
+            log(f"TIMING running: {run_t[0]}; new non-priority starts held while it runs ({len(others)} other job(s) still running)")
+    elif nxt:
+        same = st.get("phase") == "waiting" and st.get("ticket") == nxt
+        since = st.get("since", now) if same else now
+        m = TIMING_RE.search(lab(nxt)); maxw = int(m.group(1)) * 60 if m.group(1) else int(CFG["timing_max_wait_minutes"] * 60)
+        if not same:
+            log(f"TIMING window opened for {lab(nxt)}: new heavy+light starts held; waiting for {len(others)} running job(s): "
+                f"{'; '.join(others) or 'none'} (max wait {maxw // 60} min)")
+        quiet, waited = not others, now - since
+        go = quiet or waited >= maxw
+        start = (prio + [nxt])[:free] if go else prio[:free]
+        new = dict(phase="waiting", ticket=nxt, since=since, go=st.get("go", False) if same else False)
+        if go and nxt in start and not new["go"]:
+            new["go"] = True
+            why = "quiet" if quiet else f"max wait {maxw // 60} min reached, {len(others)} other job(s) still running"
+            log(f"TIMING window {why}: releasing {lab(nxt)} after {int(waited)} s")
+        hold = f"quiet window for {lab(nxt)}"
+    else:
+        if st: log("TIMING window closed: new starts resume")
+        cut = next((i for i, f in enumerate(order) if is_timing(lab(f))), len(order))   # tickets behind a timing ticket wait for it
+        start = (order[:cut] + [f for f in order[cut:] if is_priority(lab(f))])[:free]
+    TIMING_HOLD = hold
+    if DRY: return start
+    if new != st:
+        if new:
+            with open(st_f, "w") as fh: json.dump(new, fh)
+        elif os.path.exists(st_f): os.remove(st_f)
+    if hold:
+        with open(hold_f + ".tmp", "w") as fh: fh.write(hold + "\n")
+        os.replace(hold_f + ".tmp", hold_f)   # heavyrun: no light-lane shortcut while this file is fresh
+    elif os.path.exists(hold_f): os.remove(hold_f)
+    return start
 
 def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
     Q, H = os.path.join(HERE, lane), os.path.join(HERE, hold); os.makedirs(Q, exist_ok=True); os.makedirs(H, exist_ok=True)
@@ -384,18 +469,20 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
             os.remove(hold_f); log("HOLD lifted (disk and swap OK)")
         running = sum(1 for s in ("heavy.lock", "heavy.slot2", "heavy.slot3") if os.path.isdir(os.path.join(HERE, s)))
         free = max(0, allowed - running)
-        want_q = set(order[:free])
+        start = timing_gate(order, T, free)   # normally order[:free]; the timing lane may hold starts
+        want_q = set(start)
         if not DRY:
             tmp = os.path.join(HERE, "visible.txt.tmp")
-            with open(tmp, "w") as fh: fh.write("".join(f + "\n" for f in order[:free]))
+            with open(tmp, "w") as fh: fh.write("".join(f + "\n" for f in start))
             os.replace(tmp, os.path.join(HERE, "visible.txt"))
     else:
-        want_q = set(order[:1])
+        start = [f for f in order if is_priority(T[f][1])][:1] if TIMING_HOLD else order[:1]   # a timing window holds the light lane
+        want_q = set(start)
         # heavyrun re-creates its own ticket when the dispatcher parks it, so "first name in the folder" would ignore rank.txt and
         # manual_order. Light-lane waiters start only if named in visible_light.txt (heavyrun falls back to first-come if it is stale).
         if not DRY:
             tmp = os.path.join(HERE, "visible_light.txt.tmp")
-            with open(tmp, "w") as fh: fh.write("".join(f + "\n" for f in order[:1]))
+            with open(tmp, "w") as fh: fh.write("".join(f + "\n" for f in start))
             os.replace(tmp, os.path.join(HERE, "visible_light.txt"))
     if DRY: return order
     stall_alert(T, want_q, heavy_lane)

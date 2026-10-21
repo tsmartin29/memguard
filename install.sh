@@ -19,7 +19,7 @@ case "${1:-}" in
 esac
 
 mkdir -p "$DEST" "$HOME/Library/LaunchAgents" "$HOME/.local/bin"
-cp "$HERE/memguard.py" "$HERE/heavyrun" "$DEST/"; chmod +x "$DEST/memguard.py" "$DEST/heavyrun"
+cp "$HERE/memguard.py" "$HERE/heavyrun" "$HERE/timing_probe.py" "$DEST/"; chmod +x "$DEST/memguard.py" "$DEST/heavyrun" "$DEST/timing_probe.py"
 [ -e "$DEST/config.json" ] || cp "$HERE/config.example.json" "$DEST/config.json"
 [ -e "$DEST/rank.txt" ]    || cp "$HERE/rank.example.txt"    "$DEST/rank.txt"
 ln -sf "$DEST/heavyrun" "$HOME/.local/bin/heavyrun"

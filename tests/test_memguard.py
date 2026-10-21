@@ -8,6 +8,7 @@ GB = 1 << 30
 class Base(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="memguard-test-")
+        for k in [k for k in os.environ if k.startswith("HEAVY") or k.startswith("LIGHT_")]: del os.environ[k]   # tests set their own
         os.environ["MEMGUARD_HOME"] = self.home
         sys.path.insert(0, ROOT)
         sys.modules.pop("memguard", None)

@@ -9,17 +9,88 @@
 #   own queue and lock, needs >= LIGHT_MIN_FREE (default 40) percent free. If the light job runs past 15 minutes a second
 #   light slot opens so short jobs don't wait behind it.
 # HEAVY_PRIORITY=1 = front of the queue (use sparingly).
+# HEAVY_TIMING=1 = TIMING lane for benchmarks, load tests and latency/jitter measurements. Runs in the heavy lane behind a QUIET
+#   WINDOW: memguard holds new heavy and light starts until the other running jobs finish (at most HEAVY_TIMING_MAX_WAIT minutes,
+#   default timing_max_wait_minutes = 20), then holds new starts while it runs. Jobs whose label matches priority_pattern are never
+#   held. Just before the command a ~10 s probe (timing_probe.py, HEAVY_TIMING_PROBE_SECS) measures how noisy the host is and exports
+#   HOST_BASELINE_JITTER_P99_MS, HOST_BASELINE_JITTER_P50_MS, HOST_TIMER_SLACK_P99_MS, HOST_TIMER_SLACK_P50_MS, HOST_LOADAVG_1M,
+#   HOST_MEM_FREE_PCT, HOST_MEM_PRESSURE_LEVEL, HOST_OTHER_JOBS, HOST_PRIORITY_RUNNING (0/1) and HOST_BASELINE_BUSY (0/1).
+#   It probes again after the command; both summaries go to the log (BASELINE-start / BASELINE-end).
+# heavyrun --selftest-timing : dry run of the timing lane in a scratch queue with dummy sleep jobs (touches no real job).
 # Commands run with `nice -n 15`. Jobs can read $HEAVY_WORKERS (1, or 4 when the top slot has >= 60 % free memory).
 # State and log live in $MEMGUARD_HOME (default ~/.config/memguard); log: heavy_queue.log
 set -u
+# Where the real files are (heavyrun is usually a symlink in ~/.local/bin): memguard.py and timing_probe.py live next to the real file.
+BIN_DIR="$(/usr/bin/python3 -I -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0" 2>/dev/null || dirname "$0")"
+PROBE="$BIN_DIR/timing_probe.py"
+selftest_timing(){
+  local D T0 L0 H pA pB pT pC pD rc=0 n before
+  local R="${MEMGUARD_HOME:-$HOME/.config/memguard}"   # the real queue: only read here
+  D="$(mktemp -d "${TMPDIR:-/tmp}/heavyrun-selftest.XXXXXX")"; T0=$(date '+%F %T'); L0=$( (wc -l < "$R/memguard.log") 2>/dev/null || echo 0)
+  echo "selftest-timing: scratch queue $D (real queue untouched; the dispatcher copy never pauses or kills)"
+  [ "$(memory_pressure | awk -F': ' '/free percentage/{gsub("%","",$2); print $2+0}')" -ge 40 ] || echo "note: memory free < 40 %, dummy jobs wait for memory like real ones"
+  slots(){ for s in heavy.lock heavy.slot2 heavy.slot3 light.lock light.slot2; do [ -f "$R/$s/pid" ] && p=$(cat "$R/$s/pid") && echo "$s pid $p state $(ps -o state= -p "$p" | tr -d ' ') [$(cat "$R/$s/label")]"; done; }
+  before=$(slots)
+  # Dispatcher = memguard.py's real dispatch() pointed at the scratch dir, every 1 s; memory/disk gates stubbed "plenty" (this tests ORDER).
+  cat > "$D/dispatcher.py" <<'EOF'
+import os, sys, time
+sys.path.insert(0, sys.argv[1]); D = os.environ["MEMGUARD_HOME"]
+import memguard as m
+m.CFG["notify"] = False; m.mem = lambda: (16 * m.GB, 1); m.disk_and_swap = lambda: (99 * m.GB, 0)
+end = time.time() + 900
+while time.time() < end and not os.path.exists(os.path.join(D, "stop")):
+    m.dispatch(); m.dispatch("queue_light", "queue_light_hold", heavy_lane=False); time.sleep(1)
+EOF
+  MEMGUARD_HOME="$D" MEMGUARD_CONFIG="$D/config.json" /usr/bin/python3 "$D/dispatcher.py" "$BIN_DIR" & H=$!
+  run(){ MEMGUARD_HOME="$D" MEMGUARD_CONFIG="$D/config.json" MEMGUARD_REAL_HOME="$R" HEAVY_MIN_FREE=30 LIGHT_MIN_FREE=30 HEAVYRUN_POLL=1 HEAVY_TIMING_PROBE_SECS=3 "$BIN_DIR/heavyrun" "$@" >/dev/null 2>&1; }
+  waitlog(){ n=0; while ! grep -q "$1" "$D/heavy_queue.log" 2>/dev/null && [ $n -lt 120 ]; do sleep 1; n=$((n+1)); done; }
+  run "selftest: dummy A heavy 12s" /bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 1; done' & pA=$!
+  HEAVY_LIGHT=1 run "selftest: dummy B light 15s" /bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do sleep 1; done' & pB=$!
+  waitlog "START   selftest: dummy A"; waitlog "START   \[light\] selftest: dummy B"
+  HEAVY_TIMING=1 run "selftest: dummy timing job" /bin/sh -c 'env | grep "^HOST_" | sort > "$0/timing_env.txt"; for i in 1 2 3 4; do sleep 1; done' "$D" & pT=$!
+  sleep 3
+  HEAVY_LIGHT=1 run "selftest: dummy C light 2s" /bin/sh -c 'sleep 2' & pC=$!
+  run "selftest: dummy D heavy 2s" /bin/sh -c 'sleep 2' & pD=$!
+  for p in $pA $pB $pT $pC $pD; do wait $p; done
+  touch "$D/stop"; wait $H 2>/dev/null
+  echo; echo "---- heavy_queue.log (scratch) ----"; cat "$D/heavy_queue.log"
+  echo; echo "---- dispatcher TIMING log (scratch) ----"; grep -E "TIMING|error" "$D/memguard.log"
+  echo; echo "---- env seen by the timing job ----"; cat "$D/timing_env.txt" 2>/dev/null || { echo "MISSING"; rc=1; }
+  echo; echo "---- checks ----"
+  lno(){ grep -n "$1" "$D/heavy_queue.log" | head -1 | cut -d: -f1; }
+  chk(){ if [ -n "$2" ] && [ -n "$3" ] && [ "$2" -lt "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1"; rc=1; fi; }
+  chk "dummy A done before the timing job starts" "$(lno 'DONE    selftest: dummy A')" "$(lno 'START   \[timing\]')"
+  chk "light dummy B done before the timing job starts" "$(lno 'DONE    \[light\] selftest: dummy B')" "$(lno 'START   \[timing\]')"
+  chk "light dummy C (queued after) held until the timing job is done" "$(lno 'DONE    \[timing\]')" "$(lno 'START   \[light\] selftest: dummy C')"
+  chk "heavy dummy D (queued after) held until the timing job is done" "$(lno 'DONE    \[timing\]')" "$(lno 'START   selftest: dummy D')"
+  chk "baseline probe ran before the command" "$(lno 'BASELINE-start')" "$(lno 'DONE    \[timing\]')"
+  chk "baseline probe ran again after the command" "$(lno 'DONE    \[timing\]')" "$(lno 'BASELINE-end')"
+  for v in HOST_BASELINE_JITTER_P99_MS HOST_BASELINE_JITTER_P50_MS HOST_LOADAVG_1M HOST_OTHER_JOBS HOST_PRIORITY_RUNNING HOST_BASELINE_BUSY; do
+    if grep -q "^$v=" "$D/timing_env.txt" 2>/dev/null; then echo "PASS  env $v arrived"; else echo "FAIL  env $v missing"; rc=1; fi
+  done
+  echo; echo "---- real memguard.log since $T0 (pause/kill/stop lines) ----"
+  tail -n +$((L0 + 1)) "$R/memguard.log" 2>/dev/null | grep -E "PAUSED|KILLED|STOPPED|QUEUED|RESUMED" || echo "none"
+  echo "real slots before: ${before:-none}"; echo "real slots after:  $(slots)"
+  rm -rf "$D"
+  [ $rc = 0 ] && echo "selftest-timing: PASS" || echo "selftest-timing: FAIL"
+  return $rc
+}
+if [ "${1:-}" = "--selftest-timing" ]; then selftest_timing; exit $?; fi
 G="${MEMGUARD_HOME:-$HOME/.config/memguard}"; LOG="$G/heavy_queue.log"; Q="$G/queue"; MINFREE="${HEAVY_MIN_FREE:-30}"; LIGHT=0
+POLL="${HEAVYRUN_POLL:-15}"; case "$POLL" in ''|*[!0-9]*) POLL=15;; esac   # seconds between checks (tests use 1)
 mkdir -p "$G"
 SLOTS="$G/heavy.lock $G/heavy.slot2 $G/heavy.slot3"
-if [ "${HEAVY_LIGHT:-0}" = 1 ]; then LIGHT=1; SLOTS="$G/light.lock $G/light.slot2"; Q="$G/queue_light"; MINFREE="${LIGHT_MIN_FREE:-40}"; fi; mkdir -p "$Q"
+TIMING=0; [ "${HEAVY_TIMING:-0}" = 1 ] && TIMING=1
+if [ "$TIMING" = 0 ] && [ "${HEAVY_LIGHT:-0}" = 1 ]; then LIGHT=1; SLOTS="$G/light.lock $G/light.slot2"; Q="$G/queue_light"; MINFREE="${LIGHT_MIN_FREE:-40}"; fi; mkdir -p "$Q"
 # Light lane = SHORT jobs (< ~15 min, < 1.5 GB). If the job in light.lock has run > 15 min it is really a big job in the wrong lane,
 # so a second light slot opens and short jobs don't wait behind it.
 light_slot_ok(){ [ "$1" != "$G/light.slot2" ] && return 0; [ -d "$G/light.lock" ] || return 1; [ $(( $(date +%s) - $(stat -f %m "$G/light.lock") )) -gt 900 ]; }
 label="$1"; shift; [ "$LIGHT" = 1 ] && label="[light] $label"
+if [ "$TIMING" = 1 ]; then   # timing jobs always use the heavy lane (the quiet window lives there)
+  mw="${HEAVY_TIMING_MAX_WAIT:-}"; case "$mw" in ''|*[!0-9]*) mw="";; esac
+  label="[timing${mw:+ max-wait ${mw}m}] $label"
+  PSECS="${HEAVY_TIMING_PROBE_SECS:-10}"; case "$PSECS" in ''|*[!0-9.]*) PSECS=10;; esac
+fi
 pfx=""; [ "${HEAVY_PRIORITY:-0}" = 1 ] && pfx="0-"; ms="$(perl -MTime::HiRes=time -e 'printf("%d", time*1000)' 2>/dev/null || echo "$(date +%s)000")"; name="${pfx}${ms}-$$"; ticket="$Q/$name"; echo "$label" > "$ticket"
 LOCK=""
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -28,6 +99,26 @@ trap cleanup EXIT
 trap 'cleanup; exit 143' INT TERM
 log "QUEUED  $label (pid $$)"
 free_pct(){ memory_pressure | awk -F': ' '/free percentage/{gsub("%","",$2); print $2+0}'; }
+PRIO_RE=""
+priority_re(){   # priority_pattern from config.json (default "priority"), read once; the same label match memguard uses
+  [ -n "$PRIO_RE" ] || PRIO_RE="$(/usr/bin/python3 -I -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("priority_pattern", "priority"))
+except Exception: print("priority")' "${MEMGUARD_CONFIG:-$G/config.json}" 2>/dev/null)"
+  [ -n "$PRIO_RE" ] || PRIO_RE="a^"   # empty pattern = no priority labels (a^ never matches)
+}
+timing_hold(){   # is a timing quiet window on? (priority jobs are never held)
+  priority_re; echo "$label" | grep -qiE -- "$PRIO_RE" && return 1
+  [ -f "$G/timing_hold" ] && [ $(( $(date +%s) - $(stat -f %m "$G/timing_hold") )) -lt 90 ] && return 0
+  grep -qs '^\[timing' "$G"/queue/* "$G"/queue_hold/*
+}
+baseline(){   # timing lane: host-noise probe; exports HOST_* on "start", logs both
+  local line got=0 also=""; [ -n "${MEMGUARD_REAL_HOME:-}" ] && also="--also-dir $MEMGUARD_REAL_HOME"
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^HOST_[A-Z0-9_]+=-?[0-9.]+$ ]]; then [ "$1" = start ] && export "$line"
+    elif [ "${line#SUMMARY=}" != "$line" ]; then log "BASELINE-$1 $label: ${line#SUMMARY=}"; got=1; fi
+  done < <(nice -n 15 /usr/bin/python3 -I "$PROBE" --secs "$PSECS" --dir "$G" --self-pid $$ $also 2>/dev/null)
+  [ $got = 1 ] || log "BASELINE-$1 $label: probe FAILED (treat the result as inconclusive)"
+}
 allowed(){   # may this ticket start now?
   if [ "$LIGHT" = 0 ] && [ -f "$G/visible.txt" ] && [ $(( $(date +%s) - $(stat -f %m "$G/visible.txt") )) -lt 90 ]; then
     grep -qx "$name" "$G/visible.txt"; return
@@ -35,6 +126,7 @@ allowed(){   # may this ticket start now?
   if [ "$LIGHT" = 1 ] && [ -f "$G/visible_light.txt" ] && [ $(( $(date +%s) - $(stat -f %m "$G/visible_light.txt") )) -lt 90 ]; then
     # The light lane follows the dispatcher too (rank.txt, manual_order). Nobody else waiting = start at once, don't wait for the next dispatch.
     grep -qx "$name" "$G/visible_light.txt" && return 0
+    timing_hold && return 1   # no "nobody waiting" shortcut while a timing job waits or runs
     [ "$(ls "$Q" "$G/queue_light_hold" 2>/dev/null | grep -v ':$' | grep -vx "$name" | grep -c .)" = 0 ]; return
   fi
   [ "$(ls "$Q" | sort | head -1)" = "$name" ]   # no fresh dispatcher list: first come, first served
@@ -52,13 +144,15 @@ while :; do
     done
     [ -n "$LOCK" ] && break
   fi
-  sleep 15
+  sleep "$POLL"
 done
 rm -f "$ticket"; t0=$(date +%s)
 # The top job (first slot) may use more cores when memory is plentiful; jobs that support it read HEAVY_WORKERS (default 1).
 export HEAVY_WORKERS=1
 if [ "$LIGHT" = 0 ] && [ "$(basename "$LOCK")" = heavy.lock ] && [ "$(free_pct)" -ge 60 ]; then export HEAVY_WORKERS=4; fi
 log "START   $label (pid $$, $(basename "$LOCK"), workers $HEAVY_WORKERS)"
+if [ "$TIMING" = 1 ]; then export HOST_BASELINE_BUSY=1; baseline start; fi   # BUSY stays 1 if the probe fails
 nice -n 15 "$@"; rc=$?
 log "DONE    $label rc=$rc after $(( ($(date +%s)-t0)/60 )) min"
+[ "$TIMING" = 1 ] && baseline end
 exit $rc

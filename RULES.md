@@ -22,3 +22,9 @@ Numbers assume a 24 GB Mac; scale them to yours and match them to `config.json`.
    Clean your scratch and build folders as you go (move them to the Trash).
 9. Do not open more sessions just to run more heavy work in parallel. Queue it.
 10. Want a different place in line? Ask whoever owns `rank.txt` (one fragment of a job label per line).
+11. Timing-sensitive work (benchmarks, load tests, latency or jitter measurements, audio timing) runs as
+    `HEAVY_TIMING=1 heavyrun "<session>: <job>" <command...>`. It always uses the heavy lane: memguard holds new starts until the
+    other running jobs finish (or `timing_max_wait_minutes` pass), then runs it alone. Just before the command, `heavyrun` measures
+    how noisy the host is and exports `HOST_BASELINE_JITTER_P99_MS` and friends. Show that baseline next to your result, and call
+    the result "inconclusive: host busy" when `HOST_BASELINE_BUSY=1`. Never loosen a target to make a result pass: report what your
+    code adds on top of the baseline.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-21 (timing lane)
+
+- Timing lane: `HEAVY_TIMING=1 heavyrun "<label>" <command...>` for benchmarks, load tests and latency or jitter measurements. A quiet window holds new heavy and light starts until the other running jobs finish (at most `HEAVY_TIMING_MAX_WAIT` minutes, default new option `timing_max_wait_minutes` = 20), then holds new starts while the timing job runs. Running jobs are never paused or killed for it; jobs matching `priority_pattern` are never held.
+- Host baseline: new `timing_probe.py` (standard library only) runs about 10 s before and after the command and exports `HOST_BASELINE_JITTER_P99_MS`, `HOST_BASELINE_JITTER_P50_MS`, `HOST_TIMER_SLACK_P99_MS`, `HOST_TIMER_SLACK_P50_MS`, `HOST_LOADAVG_1M`, `HOST_MEM_FREE_PCT`, `HOST_MEM_PRESSURE_LEVEL`, `HOST_OTHER_JOBS`, `HOST_PRIORITY_RUNNING` and `HOST_BASELINE_BUSY` (1 when baseline p99 is above 2 ms or a priority job is running). Summaries go to `heavy_queue.log`.
+- `heavyrun --selftest-timing`: end-to-end dry run of the lane in a scratch queue with dummy jobs. `HEAVYRUN_POLL` sets the seconds between queue checks (default 15; the tests use 1).
+- `heavyrun` finds `timing_probe.py` through the `~/.local/bin` symlink; `install.sh` installs it. The stall alert names the quiet window as the reason when that is what a job waits for.
+- Fixed: the stall alert read every ticket name as a nanosecond timestamp, but `heavyrun` writes milliseconds, so a waiting job could be reported as stalled the moment it queued. It now accepts seconds, milliseconds or nanoseconds.
+- Tests: 69 (30 new) plus one opt-in end-to-end test (`MEMGUARD_RUN_SELFTEST=1`). The tests now clear inherited `HEAVY_*` variables so they pass when run through `heavyrun` itself.
+
 ## 2026-10-21
 
 - Level 2 can run two jobs: new option `level2_two_jobs_gb` (default 8). With `level2_one_job`, a second job also keeps running at pressure level 2 while available memory is at least this much. `0` restores one job.
