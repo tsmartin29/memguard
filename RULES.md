@@ -28,3 +28,10 @@ Numbers assume a 24 GB Mac; scale them to yours and match them to `config.json`.
     how noisy the host is and exports `HOST_BASELINE_JITTER_P99_MS` and friends. Show that baseline next to your result, and call
     the result "inconclusive: host busy" when `HOST_BASELINE_BUSY=1`. Never loosen a target to make a result pass: report what your
     code adds on top of the baseline.
+12. Usage limits (Claude Code plans). When weekly usage nears the limit, memguard asks the person at the Mac what to do and writes the
+    answer to `usage_decision.json` in the memguard folder (`choice`: `keep_going`, `pause_all` or `pause_heavy`, plus `window_reset`, when
+    it clears itself). Before you start a new agent, sub-agent or long task (and before any `heavyrun` job), read that file. If `choice`
+    is `pause_all` and now is before `window_reset`, do not start new agents, sub-agents, scheduled runs or long tasks: finish what is
+    running, and `heavyrun` refuses with exit code 75. Jobs labelled as priority are exempt. If it is `pause_heavy`, queue nothing in the
+    heavy lane (`heavyrun` holds it); light work and agents continue. `keep_going`, or no file: carry on. Quick check:
+    `python3 ~/.config/memguard/usagegate.py --gate "<label>"` (exit 0 go, 75 refuse, 76 heavy lane held).

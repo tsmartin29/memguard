@@ -14,13 +14,15 @@ Run 20-30 Claude Code sessions on a 24 GB laptop and sooner or later two of them
 |---|---|
 | `memguard.py` | The guard. One pass per run (launchd runs it every 15 s). Pauses (`SIGSTOP`) the biggest session job when available memory is low, kills it when memory is critical, resumes jobs one by one when memory recovers, stops the lowest-ranked paused job if memory stays low too long, holds new heavy jobs when the disk is nearly full or swap is high while memory is short, alerts you once when a queued job has waited too long, copes with macOS sitting at pressure level 2 for hours, and dispatches the `heavyrun` queue (both lanes, with an optional drag-and-drop `manual_order`, and the timing lane's quiet window). |
 | `heavyrun` | Wrapper agents use to run heavy work: `heavyrun "<session>: <job>" <command...>`. Up to 3 jobs at once (memory permitting) plus a light lane for short small jobs. Runs commands with `nice -n 15`. `HEAVY_TIMING=1` adds the timing lane (below); `heavyrun --selftest-timing` is a dry run of it. |
+| `usagegate.py` | The usage-limit prompt (Claude Code plans): asks what to do when weekly usage gets high, and holds the queue if you say so. Called by `memguard.py` every pass and by `heavyrun`. |
+| `usage_statusline.py` | Claude Code `statusLine` hook that feeds `usage.json` for `usagegate.py`. |
 | `timing_probe.py` | Host-noise probe that `heavyrun` runs before and after a timing job (~10 s each). |
 | `config.example.json` | Every threshold and pattern, with defaults for a 24 GB Mac. |
 | `rank.example.txt` | Optional job order, plus a `PARK` section for jobs that should always go last. |
 | `RULES.md` | A rules block to paste into your agents' standing instructions. |
 | `install.sh` | Copies files to `~/.config/memguard`, writes the launchd plist, loads it. |
 | `launchd/com.example.memguard.plist.template` | The launchd job (every 15 s). |
-| `tests/` | Unit tests (dispatcher ordering, rank file, manual order, priority, disk/swap hold, level-2 handling, stuck rule, job detection, light lane, heavyrun, timing lane). |
+| `tests/` | Unit tests (dispatcher ordering, rank file, manual order, priority, disk/swap hold, level-2 handling, stuck rule, job detection, light lane, heavyrun, timing lane, usage-limit prompt). No test ever shows a dialog. |
 | `CHANGELOG.md` | What changed in each update. |
 
 ## Requirements
@@ -95,6 +97,53 @@ print(f"frame jitter p99 {measured:.2f} ms (host noise p99 {p99:.2f} ms)" + ("  
 ```
 
 Never loosen a target to make a result pass: report what your code adds on top of the baseline. `heavyrun --selftest-timing` runs the lane end to end in a scratch queue with dummy jobs (about 40 s) and touches no real job.
+
+### Usage-limit prompt (Claude Code plans)
+
+On a Claude subscription the weekly limit can run out in the middle of a busy week, and work then rolls onto paid extra usage without anyone noticing. memguard can ask you first.
+
+**What it does.** `memguard.py` calls `usagegate.py` on every pass. It reads one local file, `usage.json` in the memguard folder (no credentials, no cookies, no network calls). Once per weekly window it shows a macOS dialog, and runs your optional `notify_command` (a phone push, for example), when either:
+
+- weekly usage reaches `usage_threshold_pct` (default 95), or
+- paid extra usage starts: weekly usage is at 100 %, or the `extra_spent` figure in `usage.json` rises.
+
+The dialog has three choices and runs in a detached child process, so memguard's memory checks never wait on it:
+
+| Choice | Effect until the weekly reset |
+|---|---|
+| Keep going on credits | Nothing changes. |
+| Pause new agent work until reset | `heavyrun` refuses new jobs (exit code 75 and a clear message), in both lanes. Jobs already waiting in the queue exit 75 too; running jobs finish. |
+| Pause heavy jobs only | The heavy lane waits (`heavyrun` holds, the dispatcher starts nothing); the light lane and agents continue. |
+
+Jobs whose queue label matches `priority_pattern` are exempt from both pauses. Your choice is written to `usage_decision.json` and clears itself at the weekly reset. Dismissing the dialog does nothing, and so does leaving it alone: after 10 minutes it closes itself and counts as no action.
+
+**Where `usage.json` comes from.** Claude Code passes `rate_limits.seven_day` and `rate_limits.five_hour` to a `statusLine` command, so the weekly numbers are free. Add the hook to `~/.claude/settings.json` (the hook prints nothing; set `USAGE_STATUSLINE_NEXT` to a command if you already have a status line and want to keep it):
+
+```json
+{
+  "statusLine": { "type": "command", "command": "/usr/bin/python3 -I ~/.config/memguard/usage_statusline.py" }
+}
+```
+
+The status line JSON has no extra-usage spend. If you want the "extra usage started" trigger on the spend figure, any script of yours can write it: `usage.json` is the whole interface, and the hook keeps the fields it does not know. All keys are optional:
+
+```json
+{"updated": "2026-10-21T17:45:00Z", "weekly_pct": 100.0, "weekly_resets_at": "2026-10-22T12:00:00Z", "five_hour_pct": 0.0,
+ "extra_enabled": true, "extra_spent": 12.50, "currency": "USD"}
+```
+
+Without a spend feed the prompt still fires at the threshold and at 100 %.
+
+**Config** (`config.json`): `usage_prompt` (true; false turns the whole thing off), `usage_threshold_pct` (95) and `notify_command` (empty). `notify_command` runs through the shell with the message in `$MEMGUARD_MESSAGE`, the title in `$MEMGUARD_TITLE`, and the message on stdin, for example `"curl -s -H \"Title: $MEMGUARD_TITLE\" -d \"$MEMGUARD_MESSAGE\" https://ntfy.sh/your-topic"`. It is used only for this prompt.
+
+```bash
+python3 ~/.config/memguard/usagegate.py --status      # usage.json, state and the decision in force
+python3 ~/.config/memguard/usagegate.py --dry-run     # print what it would ask, show nothing, send nothing (it does record the trigger)
+python3 ~/.config/memguard/usagegate.py --ask-now     # show the dialog now from the current usage.json
+python3 ~/.config/memguard/usagegate.py --gate "my-session: job"   # exit 0 go, 75 refuse, 76 heavy lane held
+```
+
+Tell your agents about it with `RULES.md` rule 12. For automated tests set `MEMGUARD_NO_DIALOG=1`: no dialog can then be shown, including `--test-dialog`, and the test suite sets it itself.
 
 ### Tuning for your Mac
 

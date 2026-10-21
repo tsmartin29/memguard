@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-21 (usage-limit prompt)
+
+- Usage-limit prompt for Claude Code plans. New `usagegate.py`: once per weekly window, when weekly usage reaches `usage_threshold_pct` (default 95) or paid extra usage starts (weekly at 100 %, or the `extra_spent` figure rises), it shows a macOS dialog and runs the optional `notify_command`. Three choices: keep going, pause new agent work until the weekly reset, pause heavy jobs only. Dismissing it, or 10 minutes of silence, means no action.
+- The choice is written to `usage_decision.json` and clears itself at the reset. `heavyrun` refuses new jobs with exit code 75 ("pause new agent work", both lanes, queued waiters included) or holds the heavy lane ("pause heavy jobs only"); the dispatcher starts nothing meanwhile. Jobs matching `priority_pattern` are exempt. Running jobs are never touched. The stall alert names "usage pause" as the reason.
+- New `usage_statusline.py`, a Claude Code `statusLine` hook that fills `usage.json` with the weekly and 5-hour numbers from the `rate_limits` Claude Code passes it. `usage.json` is the only interface, so any script can add `extra_enabled`, `extra_spent` and `currency`.
+- New options: `usage_prompt` (true), `usage_threshold_pct` (95), `notify_command` (empty; shell command with `$MEMGUARD_MESSAGE` and `$MEMGUARD_TITLE`, for example an ntfy push). `MEMGUARD_NO_DIALOG=1` makes sure no dialog is ever shown.
+- Tests: 130 (61 new) plus one opt-in end-to-end test. The suite sets `MEMGUARD_NO_DIALOG=1` and a test proves `osascript` is never started, including by `--test-dialog`.
+
 ## 2026-10-21 (timing lane)
 
 - Timing lane: `HEAVY_TIMING=1 heavyrun "<label>" <command...>` for benchmarks, load tests and latency or jitter measurements. A quiet window holds new heavy and light starts until the other running jobs finish (at most `HEAVY_TIMING_MAX_WAIT` minutes, default new option `timing_max_wait_minutes` = 20), then holds new starts while the timing job runs. Running jobs are never paused or killed for it; jobs matching `priority_pattern` are never held.

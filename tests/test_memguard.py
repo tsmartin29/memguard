@@ -2,6 +2,7 @@
 from unittest import mock
 import json, os, subprocess, sys, tempfile, time, unittest, importlib, shutil
 
+os.environ["MEMGUARD_NO_DIALOG"] = "1"   # no test may ever put a dialog on screen
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GB = 1 << 30
 

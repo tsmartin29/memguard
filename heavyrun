@@ -16,6 +16,8 @@
 #   HOST_BASELINE_JITTER_P99_MS, HOST_BASELINE_JITTER_P50_MS, HOST_TIMER_SLACK_P99_MS, HOST_TIMER_SLACK_P50_MS, HOST_LOADAVG_1M,
 #   HOST_MEM_FREE_PCT, HOST_MEM_PRESSURE_LEVEL, HOST_OTHER_JOBS, HOST_PRIORITY_RUNNING (0/1) and HOST_BASELINE_BUSY (0/1).
 #   It probes again after the command; both summaries go to the log (BASELINE-start / BASELINE-end).
+# Usage-limit prompt: after the person picks "Pause new agent work" or "Pause heavy jobs only", heavyrun refuses (exit 75) or holds
+#   jobs until the weekly reset; see README "Usage-limit prompt". Jobs whose label matches priority_pattern are exempt.
 # heavyrun --selftest-timing : dry run of the timing lane in a scratch queue with dummy sleep jobs (touches no real job).
 # Commands run with `nice -n 15`. Jobs can read $HEAVY_WORKERS (1, or 4 when the top slot has >= 60 % free memory).
 # State and log live in $MEMGUARD_HOME (default ~/.config/memguard); log: heavy_queue.log
@@ -91,6 +93,14 @@ if [ "$TIMING" = 1 ]; then   # timing jobs always use the heavy lane (the quiet 
   label="[timing${mw:+ max-wait ${mw}m}] $label"
   PSECS="${HEAVY_TIMING_PROBE_SECS:-10}"; case "$PSECS" in ''|*[!0-9.]*) PSECS=10;; esac
 fi
+# Usage-limit decision (usagegate.py, file usage_decision.json, clears itself at the weekly reset). Fails open.
+#   "Pause new agent work until reset": refuse to start (exit 75 and a clear message) unless the label matches priority_pattern;
+#   jobs already waiting in the queue exit 75 too. "Pause heavy jobs only": the heavy lane waits, the light lane continues.
+#   Running jobs are never touched.
+GATE_MSG=""
+usage_gate(){ [ -f "$BIN_DIR/usagegate.py" ] || return 0
+  GATE_MSG=$(/usr/bin/python3 -I "$BIN_DIR/usagegate.py" --gate "$label" --lane "$([ "$LIGHT" = 1 ] && echo light || echo heavy)" --dir "$G" 2>/dev/null); return $?; }
+usage_gate; [ $? = 75 ] && { echo "$GATE_MSG" >&2; exit 75; }
 pfx=""; [ "${HEAVY_PRIORITY:-0}" = 1 ] && pfx="0-"; ms="$(perl -MTime::HiRes=time -e 'printf("%d", time*1000)' 2>/dev/null || echo "$(date +%s)000")"; name="${pfx}${ms}-$$"; ticket="$Q/$name"; echo "$label" > "$ticket"
 LOCK=""
 log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
@@ -131,7 +141,15 @@ allowed(){   # may this ticket start now?
   fi
   [ "$(ls "$Q" | sort | head -1)" = "$name" ]   # no fresh dispatcher list: first come, first served
 }
+USAGE_HELD=0
 while :; do
+  usage_gate; ug=$?
+  if [ $ug = 75 ]; then log "REFUSED $label (new agent work is paused until the weekly reset)"; echo "$GATE_MSG" >&2; exit 75; fi
+  if [ $ug = 76 ]; then
+    [ $USAGE_HELD = 0 ] && { USAGE_HELD=1; log "HELD    $label ($GATE_MSG)"; }
+    sleep "$POLL"; continue
+  fi
+  [ $USAGE_HELD = 1 ] && { USAGE_HELD=0; log "UNHELD  $label (usage hold ended)"; }
   # a full disk can stop the ticket from being written; rewrite it if missing.
   [ -e "$ticket" ] || echo "$label" > "$ticket" 2>/dev/null
   for s in $SLOTS; do   # stale slot (holder died)

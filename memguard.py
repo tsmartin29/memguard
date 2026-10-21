@@ -20,6 +20,7 @@ It also acts as the dispatcher for the `heavyrun` queue: it decides which queued
 (priority tickets, then rank.txt order, then first come first served) and holds all new heavy jobs while
 swap is high or the disk is nearly full. An optional manual_order file lets a UI drag-and-drop re-rank the queue.
 Timing lane: `HEAVY_TIMING=1 heavyrun ...` opens a quiet window (no new job starts) so a benchmark runs on a quiet machine.
+Usage-limit prompt: with a usage.json (see usagegate.py) it asks what to do when weekly Claude usage is high; your choice can hold the queue.
 
 Config: $MEMGUARD_CONFIG, else $MEMGUARD_HOME/config.json (default home: ~/.config/memguard). See config.example.json.
 Usage:  memguard.py            one pass (this is what launchd runs)
@@ -58,6 +59,11 @@ DEFAULTS = {
     "priority_pattern": "priority",
     # Timing lane (HEAVY_TIMING=1 heavyrun ...): the longest a timing job waits for the other running jobs to finish before it starts anyway.
     "timing_max_wait_minutes": 20,
+    # Usage-limit prompt (Claude Code plans), see usagegate.py: ask once per weekly window when weekly usage reaches usage_threshold_pct
+    # or paid extra usage starts. It acts only when usage.json exists. notify_command (optional) is run through the shell with the
+    # message in $MEMGUARD_MESSAGE and $MEMGUARD_TITLE (and on stdin), e.g. a phone push:
+    #   "notify_command": "curl -s -H \"Title: $MEMGUARD_TITLE\" -d \"$MEMGUARD_MESSAGE\" https://ntfy.sh/your-topic"
+    "usage_prompt": True, "usage_threshold_pct": 95, "notify_command": "",
     "stall_alert_minutes": 45,    # one notification (and a line in stalled.txt) when a queued job waits this long; 0 = off
     "disk_path": "~",             # which disk to watch
     "stuck_seconds": 300, "stuck_interval_seconds": 60,
@@ -327,6 +333,17 @@ def ticket_time(name):
     v = int(name.split("-")[-2])
     return v / 1e9 if v > 1e17 else v / 1e3 if v > 1e11 else float(v)
 
+USAGE_HOLD = ""   # set by dispatch() while a usage decision (usagegate.py) holds a lane
+
+def usage_decision():
+    """The pause choice from usagegate.py in force (dict) or None. Never raises."""
+    if not CFG.get("usage_prompt", True): return None
+    try:
+        import usagegate
+        return usagegate.active_decision(HERE)
+    except Exception as e:
+        log(f"usage hold error: {e!r}"); return None
+
 def stall_alert(T, want_q, heavy_lane):
     """One notification per ticket that has waited longer than stall_alert_minutes, with the reason; also appended to stalled.txt."""
     mins = CFG.get("stall_alert_minutes", 45)
@@ -340,7 +357,7 @@ def stall_alert(T, want_q, heavy_lane):
             try: waited = time.time() - ticket_time(f)   # ticket names start with a timestamp
             except (ValueError, IndexError): continue
             if waited < mins * 60: continue
-            why = "disk/swap hold" if held else "timing quiet window" if TIMING_HOLD else "waiting for a free slot"
+            why = "disk/swap hold" if held else "timing quiet window" if TIMING_HOLD else "usage pause" if USAGE_HOLD and not is_priority(label) else "waiting for a free slot"
             with open(os.path.join(HERE, "stalled.txt"), "a") as fh:
                 fh.write(f"{time.strftime('%Y-%m-%d %H:%M')} STALLED {int(waited // 60)} min ({why}): {label}\n")
             notify(f"Job waiting {int(waited // 60)} min ({why}): {label[:60]}")
@@ -451,6 +468,14 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
     normal = apply_manual_order(normal, T, read_manual_order())
     prio = sorted(f for f in T if f.startswith("0-"))
     order = prio + normal
+    # A usage decision (usagegate.py) holds queued work: "pause_heavy" holds the heavy lane, "pause_all" both lanes. Only tickets whose
+    # label matches priority_pattern still start. Running jobs are never touched. The decision clears itself at the weekly reset.
+    global USAGE_HOLD
+    dec = usage_decision()
+    if dec and (dec["choice"] == "pause_all" or heavy_lane):
+        order = [f for f in order if is_priority(T[f][1])]
+        USAGE_HOLD = "usage pause: " + dec["choice"]
+    elif heavy_lane: USAGE_HOLD = ""
     if heavy_lane:   # memory-budget slots
         avail, _ = mem()
         allowed = 1 + (avail >= SLOT2_AVAIL) + (avail >= SLOT3_AVAIL)
@@ -509,3 +534,8 @@ if __name__ == "__main__":
     except Exception as e: log(f"dispatch error: {e!r}")
     try: main()
     except Exception as e: log(f"error: {e!r}")
+    if not DRY and CFG.get("usage_prompt", True):   # last, so memory protection is never delayed; the dialog is a detached child
+        try:
+            import usagegate
+            usagegate.check(HERE)
+        except Exception as e: log(f"usage check error: {e!r}")

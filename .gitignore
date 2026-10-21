@@ -14,3 +14,7 @@ stalled_seen.txt
 manual_order
 timing_window.json
 timing_hold
+usage.json
+usage_state.json
+usage_decision*.json
+usage_prompt*
