@@ -282,5 +282,14 @@ class HeavyrunTests(Base):
         r = subprocess.run([os.path.join(ROOT, "heavyrun"), "test: fail", "sh", "-c", "exit 7"], env=env, capture_output=True, timeout=90)
         self.assertEqual(r.returncode, 7)
 
+
+class PidGuard(Base):
+    """anthropics/claude-code#104156: a stray -1 or 0 in a pid list must never reach os.kill."""
+    def test_sig_skips_dangerous_pids(self):
+        import signal
+        with mock.patch.object(self.mg.os, "kill") as k:
+            self.mg.sig({"pids": [-1, 0, 1, os.getpid(), "12", 424242]}, signal.SIGKILL)
+        self.assertEqual([c.args for c in k.call_args_list], [(424242, signal.SIGKILL)])
+
 if __name__ == "__main__":
     unittest.main()

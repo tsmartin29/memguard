@@ -185,6 +185,8 @@ def secs(et):
 def sig(job, s):
     if DRY: return
     for p in job["pids"]:
+        # never -1 (every process you own), 0 (our own group), 1 (launchd) or ourselves: anthropics/claude-code#104156
+        if not isinstance(p, int) or p < 2 or p == os.getpid(): continue
         try: os.kill(p, s)
         except ProcessLookupError: pass
 
