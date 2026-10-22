@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-21 (pid guard)
+
+- `sig()` never signals pid -1 (every process the user owns), 0 (memguard's own process group), 1 (launchd) or memguard itself, even if a job record were corrupted. Prompted by anthropics/claude-code#104156, where an agent script's `kill(-1, SIGKILL)` took down every session and the desktop.
+- Tests: 131 (1 new).
+
 ## 2026-10-21 (usage-limit prompt)
 
 - Usage-limit prompt for Claude Code plans. New `usagegate.py`: once per weekly window, when weekly usage reaches `usage_threshold_pct` (default 95) or paid extra usage starts (weekly at 100 %, or the `extra_spent` figure rises), it shows a macOS dialog and runs the optional `notify_command`. Three choices: keep going, pause new agent work until the weekly reset, pause heavy jobs only. Dismissing it, or 10 minutes of silence, means no action.
