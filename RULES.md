@@ -35,3 +35,13 @@ Numbers assume a 24 GB Mac; scale them to yours and match them to `config.json`.
     running, and `heavyrun` refuses with exit code 75. Jobs labelled as priority are exempt. If it is `pause_heavy`, queue nothing in the
     heavy lane (`heavyrun` holds it); light work and agents continue. `keep_going`, or no file: carry on. Quick check:
     `python3 ~/.config/memguard/usagegate.py --gate "<label>"` (exit 0 go, 75 refuse, 76 heavy lane held).
+13. Afterburner (more CPU for a while). Only the person at the Mac turns it on: `afterburner on [2h] [reason]`, `afterburner off`,
+    `afterburner status`. Never turn it on yourself. While it is on, the heavy lane may run more jobs (as many as memory allows), the light
+    lane gets a second slot and `heavyrun` uses `nice -n 10`. The memory floors never change. Your ONE-worker rule becomes "up to N
+    workers": read N from `afterburner status` (line "WORKERS PER AGENT N") or `workers_per_agent` in `~/.config/memguard/afterburner.json`
+    (only when `"on"` is true). Re-check N between long jobs: afterburner drops back to normal by itself (memory pressure, sustained load,
+    battery, a configured app in front, or time up), and then N is 1 again. Dropping never stops a running job.
+14. Tidy (clean, save, back up). `tidy --dry-run` shows the plan; `tidy` runs it; `--only clean|save|backup` runs one step. It moves only
+    regenerable build output under the configured roots to one dated Trash folder (never `rm`), skips any tree edited in the last 30
+    minutes, any tree a process has open and any tree a queued or running `heavyrun` job names, so put the path of the tree you work in into
+    your job label. Never move or delete build output yourself in a tree another session is using; run `tidy --dry-run` and ask.

@@ -9,6 +9,8 @@
   "slot2_avail_gb": 10,
   "slot3_avail_gb": 14,
   "max_heavy_jobs": 3,
+  "stop_grace_seconds": 30,
+  "stop_hard_avail_gb": 1.5,
   "disk_hold_gb": 6.5,
   "swap_hold_gb": 6,
   "swap_low_avail_gb": 8,
@@ -31,5 +33,56 @@
   "protect_pattern": "(Claude\\.app|WindowServer|Google Chrome|Safari|Firefox|Finder|loginwindow|launchd|kernel_task|Dock|SystemUIServer|memguard)",
   "protect_extra": "",
   "headless_pattern": "--headless|for Testing|puppeteer|playwright",
-  "notify": true
+  "notify": true,
+  "afterburner_max_heavy": 0,
+  "afterburner_extra_slot_gb": 3,
+  "afterburner_light_slots": 2,
+  "afterburner_nice": 10,
+  "afterburner_default_hours": 2,
+  "afterburner_max_hours": 24,
+  "afterburner_load_factor": 1.5,
+  "afterburner_load_seconds": 120,
+  "afterburner_battery_min_pct": 30,
+  "afterburner_drop_apps": "",
+  "tidy": {
+    "roots": [
+      "~/Developer",
+      "~/code",
+      "~/Work"
+    ],
+    "protect": [],
+    "recent_minutes": 30,
+    "never_dirs": [
+      ".git",
+      "node_modules",
+      "dist",
+      "release",
+      "releases"
+    ],
+    "keep_build_prefixes": [
+      "build-release"
+    ],
+    "push_repos": [],
+    "push_public_repos": false,
+    "save_command": "",
+    "backup_sources": [],
+    "backup_extra_files": [],
+    "backup_folder_prefix": "memguard_backup_",
+    "backup_drive": "",
+    "refuse_drive_markers": [
+      "DCIM"
+    ],
+    "min_drive_free_gb": 10,
+    "rsync_excludes": [
+      "node_modules/",
+      ".netlify/",
+      ".wrangler/",
+      "__pycache__/",
+      ".pytest_cache/",
+      ".pio/",
+      ".venv/"
+    ],
+    "log_file": "",
+    "pio_cache_days": 14
+  }
 }

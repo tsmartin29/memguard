@@ -1,0 +1,5 @@
+#!/bin/bash
+# tidy: one step = clean build output to the Trash, save + push, back up to an attached drive. `tidy --dry-run` shows the plan.
+# See tidy.py and README "Tidy". Usually a symlink in ~/.local/bin; tidy.py lives next to the real file.
+DIR="$(/usr/bin/python3 -I -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0" 2>/dev/null || dirname "$0")"
+exec /usr/bin/python3 -I "$DIR/tidy.py" "$@"

@@ -19,7 +19,10 @@
 # Usage-limit prompt: after the person picks "Pause new agent work" or "Pause heavy jobs only", heavyrun refuses (exit 75) or holds
 #   jobs until the weekly reset; see README "Usage-limit prompt". Jobs whose label matches priority_pattern are exempt.
 # heavyrun --selftest-timing : dry run of the timing lane in a scratch queue with dummy sleep jobs (touches no real job).
-# Commands run with `nice -n 15`. Jobs can read $HEAVY_WORKERS (1, or 4 when the top slot has >= 60 % free memory).
+# Afterburner (`afterburner on 2h`, see afterburner.py): the heavy lane gets more slots (heavy.slot4 ...), still only as many as
+#   memguard's memory tiers allow; the light lane gets 2 slots; commands run with nice -n 10. Caps come from `afterburner.py caps`
+#   and fall back to normal (3 heavy, 1 light, nice 15) if anything is wrong.
+# Commands run with `nice -n 15` (10 in afterburner). Jobs can read $HEAVY_WORKERS (1, or 4 when the top slot has >= 60 % free memory).
 # State and log live in $MEMGUARD_HOME (default ~/.config/memguard); log: heavy_queue.log
 set -u
 # Where the real files are (heavyrun is usually a symlink in ~/.local/bin): memguard.py and timing_probe.py live next to the real file.
@@ -81,12 +84,16 @@ if [ "${1:-}" = "--selftest-timing" ]; then selftest_timing; exit $?; fi
 G="${MEMGUARD_HOME:-$HOME/.config/memguard}"; LOG="$G/heavy_queue.log"; Q="$G/queue"; MINFREE="${HEAVY_MIN_FREE:-30}"; LIGHT=0
 POLL="${HEAVYRUN_POLL:-15}"; case "$POLL" in ''|*[!0-9]*) POLL=15;; esac   # seconds between checks (tests use 1)
 mkdir -p "$G"
-SLOTS="$G/heavy.lock $G/heavy.slot2 $G/heavy.slot3"
+# Afterburner caps: "HEAVY_CAP LIGHT_SLOTS NICE" (normal 3 1 15). Fails safe to normal.
+ab_caps(){ local c; c=$(/usr/bin/python3 -I "$BIN_DIR/afterburner.py" caps --dir "$G" 2>/dev/null); set -- $c
+  case "${1:-}${2:-}${3:-}" in ''|*[!0-9]*) HCAP=3; LSLOTS=1; NICEV=15;; *) HCAP=$1; LSLOTS=$2; NICEV=$3;; esac; }
+heavy_slots(){ local i; SLOTS="$G/heavy.lock"; for ((i=2; i<=HCAP; i++)); do SLOTS="$SLOTS $G/heavy.slot$i"; done; }
+ab_caps; heavy_slots
 TIMING=0; [ "${HEAVY_TIMING:-0}" = 1 ] && TIMING=1
 if [ "$TIMING" = 0 ] && [ "${HEAVY_LIGHT:-0}" = 1 ]; then LIGHT=1; SLOTS="$G/light.lock $G/light.slot2"; Q="$G/queue_light"; MINFREE="${LIGHT_MIN_FREE:-40}"; fi; mkdir -p "$Q"
 # Light lane = SHORT jobs (< ~15 min, < 1.5 GB). If the job in light.lock has run > 15 min it is really a big job in the wrong lane,
 # so a second light slot opens and short jobs don't wait behind it.
-light_slot_ok(){ [ "$1" != "$G/light.slot2" ] && return 0; [ -d "$G/light.lock" ] || return 1; [ $(( $(date +%s) - $(stat -f %m "$G/light.lock") )) -gt 900 ]; }
+light_slot_ok(){ [ "$1" != "$G/light.slot2" ] && return 0; [ "$LSLOTS" -ge 2 ] && return 0; [ -d "$G/light.lock" ] || return 1; [ $(( $(date +%s) - $(stat -f %m "$G/light.lock") )) -gt 900 ]; }
 label="$1"; shift; [ "$LIGHT" = 1 ] && label="[light] $label"
 if [ "$TIMING" = 1 ]; then   # timing jobs always use the heavy lane (the quiet window lives there)
   mw="${HEAVY_TIMING_MAX_WAIT:-}"; case "$mw" in ''|*[!0-9]*) mw="";; esac
@@ -152,7 +159,9 @@ while :; do
   [ $USAGE_HELD = 1 ] && { USAGE_HELD=0; log "UNHELD  $label (usage hold ended)"; }
   # a full disk can stop the ticket from being written; rewrite it if missing.
   [ -e "$ticket" ] || echo "$label" > "$ticket" 2>/dev/null
-  for s in $SLOTS; do   # stale slot (holder died)
+  ab_caps; [ "$LIGHT" = 0 ] && heavy_slots   # afterburner may switch on or off while we wait
+  for s in $SLOTS "$G"/heavy.slot*; do   # stale slot (holder died); also slots left over from an afterburner run
+    [ "$LIGHT" = 1 ] && [ "${s#$G/heavy.}" != "$s" ] && continue
     if [ -d "$s" ] && ! kill -0 "$(cat "$s/pid" 2>/dev/null)" 2>/dev/null; then rm -rf "$s"; fi
   done
   if [ -e "$ticket" ] && allowed && [ "$(free_pct)" -ge "$MINFREE" ]; then
@@ -168,9 +177,10 @@ rm -f "$ticket"; t0=$(date +%s)
 # The top job (first slot) may use more cores when memory is plentiful; jobs that support it read HEAVY_WORKERS (default 1).
 export HEAVY_WORKERS=1
 if [ "$LIGHT" = 0 ] && [ "$(basename "$LOCK")" = heavy.lock ] && [ "$(free_pct)" -ge 60 ]; then export HEAVY_WORKERS=4; fi
-log "START   $label (pid $$, $(basename "$LOCK"), workers $HEAVY_WORKERS)"
+ab_caps; ABTAG=""; [ "$NICEV" != 15 ] && ABTAG=", afterburner nice $NICEV"
+log "START   $label (pid $$, $(basename "$LOCK"), workers $HEAVY_WORKERS$ABTAG)"
 if [ "$TIMING" = 1 ]; then export HOST_BASELINE_BUSY=1; baseline start; fi   # BUSY stays 1 if the probe fails
-nice -n 15 "$@"; rc=$?
+nice -n "$NICEV" "$@"; rc=$?
 log "DONE    $label rc=$rc after $(( ($(date +%s)-t0)/60 )) min"
 [ "$TIMING" = 1 ] && baseline end
 exit $rc

@@ -1,0 +1,5 @@
+#!/bin/bash
+# afterburner on [duration, default 2h] [reason] | off | status   (see afterburner.py and README "Afterburner")
+# Usually a symlink in ~/.local/bin; afterburner.py lives next to the real file.
+DIR="$(/usr/bin/python3 -I -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0" 2>/dev/null || dirname "$0")"
+exec /usr/bin/python3 -I "$DIR/afterburner.py" "$@"

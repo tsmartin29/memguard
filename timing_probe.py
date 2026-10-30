@@ -19,7 +19,7 @@ import argparse, json, os, re, select, subprocess, sys, time
 PERIODS_MS = (2.5, 23.0)
 WORK_S = 0.0002     # CPU work per noise tick
 BUSY_P99_MS = 2.0   # RULES.md: host-noise p99 above this = "inconclusive: host busy"
-SLOTS = ("heavy.lock", "heavy.slot2", "heavy.slot3", "light.lock", "light.slot2")
+SLOT_RE = re.compile(r"^(heavy|light)\.(lock|slot\d+)$")   # heavy.lock, heavy.slot2, heavy.slot3 (slot4+ in afterburner), light.lock, light.slot2
 
 def worker(mode, period_s, secs):
     kq = select.kqueue(); t0 = time.perf_counter(); n = 1; late = []
@@ -45,7 +45,9 @@ def worker(mode, period_s, secs):
 def other_jobs(dirs, self_pid):
     seen, out = set(), []
     for d in dirs:
-        for s in SLOTS:
+        try: names = sorted(n for n in os.listdir(d) if SLOT_RE.match(n))
+        except OSError: names = []
+        for s in names:
             p = os.path.join(d, s)
             if not os.path.isdir(p): continue
             try: pid = int(open(os.path.join(p, "pid")).read().strip())

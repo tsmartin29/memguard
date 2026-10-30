@@ -14,20 +14,23 @@ Run 20-30 Claude Code sessions on a 24 GB laptop and sooner or later two of them
 |---|---|
 | `memguard.py` | The guard. One pass per run (launchd runs it every 15 s). Pauses (`SIGSTOP`) the biggest session job when available memory is low, kills it when memory is critical, resumes jobs one by one when memory recovers, stops the lowest-ranked paused job if memory stays low too long, holds new heavy jobs when the disk is nearly full or swap is high while memory is short, alerts you once when a queued job has waited too long, copes with macOS sitting at pressure level 2 for hours, and dispatches the `heavyrun` queue (both lanes, with an optional drag-and-drop `manual_order`, and the timing lane's quiet window). |
 | `heavyrun` | Wrapper agents use to run heavy work: `heavyrun "<session>: <job>" <command...>`. Up to 3 jobs at once (memory permitting) plus a light lane for short small jobs. Runs commands with `nice -n 15`. `HEAVY_TIMING=1` adds the timing lane (below); `heavyrun --selftest-timing` is a dry run of it. |
+| `afterburner.py`, `afterburner` | Afterburner: `afterburner on 2h` raises the queue caps for a while (more heavy jobs as memory allows, a second light slot, `nice -n 10`) and drops back to normal by itself. |
+| `tidy.py`, `tidy` | One step to clean build output to the Trash, push unpushed branches and back up to an attached drive. `tidy --dry-run` shows the plan. |
+| `hangar/` | Hangar, an optional SwiftUI menu-bar app with buttons for afterburner, tidy, save and backup (`Hangar.swift`, `build.sh`, `shots/`). |
 | `usagegate.py` | The usage-limit prompt (Claude Code plans): asks what to do when weekly usage gets high, and holds the queue if you say so. Called by `memguard.py` every pass and by `heavyrun`. |
 | `usage_statusline.py` | Claude Code `statusLine` hook that feeds `usage.json` for `usagegate.py`. |
 | `timing_probe.py` | Host-noise probe that `heavyrun` runs before and after a timing job (~10 s each). |
-| `config.example.json` | Every threshold and pattern, with defaults for a 24 GB Mac. |
+| `config.example.json` | Every threshold and pattern, with defaults for a 24 GB Mac, plus the afterburner settings and the `tidy` block. |
 | `rank.example.txt` | Optional job order, plus a `PARK` section for jobs that should always go last. |
 | `RULES.md` | A rules block to paste into your agents' standing instructions. |
-| `install.sh` | Copies files to `~/.config/memguard`, writes the launchd plist, loads it. |
+| `install.sh` | Copies files to `~/.config/memguard`, links `heavyrun`, `afterburner` and `tidy` into `~/.local/bin`, writes the launchd plist, loads it. |
 | `launchd/com.example.memguard.plist.template` | The launchd job (every 15 s). |
-| `tests/` | Unit tests (dispatcher ordering, rank file, manual order, priority, disk/swap hold, level-2 handling, stuck rule, job detection, light lane, heavyrun, timing lane, usage-limit prompt). No test ever shows a dialog. |
+| `tests/` | Unit tests (dispatcher ordering, rank file, manual order, priority, disk/swap hold, level-2 handling, stuck rule, job detection, light lane, heavyrun, timing lane, usage-limit prompt, graceful stop, afterburner, tidy). No test ever shows a dialog, and the tidy tests run on a scratch home, scratch volumes and a scratch Trash. |
 | `CHANGELOG.md` | What changed in each update. |
 
 ## Requirements
 
-macOS (uses `vm_stat`, `memory_pressure`, `sysctl`, `top`, `launchctl`, BSD `stat`), the `/usr/bin/python3` that ships with macOS (3.9+), `perl` (ships with macOS; used for a millisecond timestamp).
+macOS (uses `vm_stat`, `memory_pressure`, `sysctl`, `top`, `launchctl`, BSD `stat`), the `/usr/bin/python3` that ships with macOS (3.9+), `perl` (ships with macOS; used for a millisecond timestamp). `tidy` also uses `git` and `rsync`; Hangar needs macOS 13+ and the Xcode command line tools to build.
 
 ## Install
 
@@ -57,7 +60,7 @@ Then paste `RULES.md` into your global `CLAUDE.md` so the agents actually use th
 
 ### What it will and will not touch
 
-It only acts on processes that have a Claude Code session (matched by `session_pattern`) or `heavyrun` as an ancestor. Browsers, the Claude app, Finder, system processes and anything in `protect_pattern` / `protect_extra` are skipped (add your DAW, IDE, etc. to `protect_extra`). Headless browsers started by a session do count as jobs. Killing is a last resort: the biggest session job gets SIGTERM, then SIGKILL, and its queue waiter exits so the session can re-queue it.
+It only acts on processes that have a Claude Code session (matched by `session_pattern`) or `heavyrun` as an ancestor. Browsers, the Claude app, Finder, system processes and anything in `protect_pattern` / `protect_extra` are skipped (add your DAW, IDE, etc. to `protect_extra`). Headless browsers started by a session do count as jobs. Killing is a last resort: the biggest session job gets SIGTERM and up to `stop_grace_seconds` (default 30) to save its work, for example a training run writing a checkpoint, then SIGKILL; its queue waiter exits so the session can re-queue it. The grace is 3 s when memory was already under `kill_avail_gb`, and it is cut short if memory falls under `stop_hard_avail_gb`. The log line says whether the job `saved` (exited by itself) or was `forced`.
 
 ### Pressure level 2 and manual order
 
@@ -144,6 +147,61 @@ python3 ~/.config/memguard/usagegate.py --gate "my-session: job"   # exit 0 go, 
 ```
 
 Tell your agents about it with `RULES.md` rule 12. For automated tests set `MEMGUARD_NO_DIALOG=1`: no dialog can then be shown, including `--test-dialog`, and the test suite sets it itself.
+
+### Afterburner
+
+Sometimes you want the Mac to work harder for a while: a big batch tonight, a deadline this afternoon. `afterburner on` raises the queue caps for a set time and drops back to normal by itself.
+
+```bash
+afterburner on              # 2 hours (afterburner_default_hours)
+afterburner on 4h big batch # 4 hours, with a reason for the log
+afterburner status          # time left, caps, load, memory, and whether anything would drop it now
+afterburner off
+```
+
+While it is on:
+
+- The heavy lane may run up to `afterburner_max_heavy` jobs (default: cores - 2, at least 3), but only as many as memory allows: the usual tiers (2nd job at `slot2_avail_gb`, 3rd at `slot3_avail_gb`), then `afterburner_extra_slot_gb` (3) more for each further job.
+- The light lane gets `afterburner_light_slots` (2) slots, and `heavyrun` starts commands with `nice -n` `afterburner_nice` (10) instead of 15.
+- Agents may use more workers: `afterburner.json` carries `workers_per_agent` = (cores - 2) // running agent sessions, at least 1. `RULES.md` rule 13 tells agents to read it.
+- The memory floors never change: pause, kill and resume lines, the disk and swap hold and the stuck rule work exactly as in normal mode.
+
+It drops back to normal (one line in `memguard.log` and a notification) when memory pressure reaches WARN, when the 1-minute load stays above cores x `afterburner_load_factor` (1.5) for `afterburner_load_seconds` (120), on battery below `afterburner_battery_min_pct` (30), when the time is up, or when an app matching `afterburner_drop_apps` comes to the front or starts (empty by default; set it to your DAW or editor, for example `"Ableton Live|Logic Pro"`). If memguard stops running, the caps go back to normal within 2 minutes. Dropping never pauses or stops a running job; new starts simply follow the normal caps again.
+
+### Tidy
+
+Agent sessions leave build folders everywhere. `tidy` is one command that cleans them up, saves your work and backs it up, and it only does what the `tidy` block in `config.json` allows:
+
+```bash
+tidy --dry-run              # the plan; nothing changes
+tidy                        # clean -> save -> backup -> one summary line
+tidy --only clean           # one step (clean | save | backup)
+tidy --drive /Volumes/X     # back up to this drive
+tidy --status               # one line of JSON (Hangar reads it)
+```
+
+1. **Clean.** Under `roots` it looks for regenerable build output: `.pio`, CMake/JUCE/Zephyr build folders (only when git ignores them), `__pycache__`, `.pytest_cache`, PlatformIO toolchain versions no `platformio.ini` names, and ccache over its cap. Everything goes to ONE dated folder in the Trash (`~/.Trash/tidy_<date_time>`) with a `TIDY_MANIFEST.txt` of original paths and sizes. Never `rm`. It skips `protect` paths, any tree edited in the last `recent_minutes` (30), any tree a process has open, any tree a queued or running `heavyrun` job names in its label, git-tracked files, `never_dirs`, virtualenvs, folders starting with `keep_build_prefixes` and build folders a tracked script refers to.
+2. **Save.** Runs your `save_command` if you set one, then pushes every local branch with commits not on origin in the `push_repos` (`owner/name` slugs, or `"*"` for every repo under the roots): same branch name, fast-forward only, never forced. New commits that look like they contain a secret (`.env`, keys, common token shapes) are not pushed. Only private repos are pushed unless `push_public_repos` is true.
+3. **Backup.** Picks `backup_drive`, or a volume that already holds a `<backup_folder_prefix>*` folder, and writes `<prefix><YYYY-MM-DD>/git_bundles/` (a verified `git bundle --all` per repo) and `files/` (rsync of `backup_sources`, no `--delete`, unchanged files hard-linked to the previous dated folder so they take no new space). It runs as one light-lane `heavyrun` job. It never uses the startup disk, a Time Machine volume, or a volume with one of the `refuse_drive_markers` folders (default `DCIM`, a camera card) unless you name it with `--drive` or approve it once with `tidy --approve-drive /Volumes/X` (remembered by volume UUID). It waits when memory pressure is high.
+4. **Report.** One summary line to `log_file` (default `tidy.log` in the memguard folder) and a notification.
+
+Start with `tidy --dry-run` after you fill in the `tidy` block; with the defaults it cleans only `~/Developer`, `~/code` and `~/Work`, pushes nothing and has no backup sources.
+
+### Hangar (menu-bar app)
+
+<p>
+<img src="hangar/shots/hangar_panel_light.png" width="300" alt="Hangar panel, light mode">
+<img src="hangar/shots/hangar_afterburner_on_dark.png" width="300" alt="Hangar with afterburner on, dark mode">
+</p>
+
+Hangar is a small SwiftUI menu-bar app: click the plane and a panel opens with an F-22 button for afterburner, a broom for Tidy, Save + push, Backup and "Do all three". It only runs `afterburner` and `tidy` and shows their result line. Tidy, Backup and "Do all three" first show the `--dry-run` plan and wait for one Confirm. The plane in the menu bar shows the time left while afterburner is on.
+
+```bash
+hangar/build.sh                 # builds and installs ~/Applications/Hangar.app (an old copy goes to the Trash)
+hangar/build.sh --no-install    # build only, into hangar/build (or HANGAR_OUT=<dir>)
+```
+
+Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs no admin rights. Clicking the plane opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the panel. `HANGAR_TIDY` and `HANGAR_AFTERBURNER` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>` renders the screenshots in `hangar/shots/` offscreen, without a menu-bar item; the ones here were taken with a sample config.
 
 ### Tuning for your Mac
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-30 (afterburner, tidy, Hangar)
+
+- Afterburner: new `afterburner.py` and the `afterburner` command (`on [2h] [reason]`, `off`, `status`, `caps`). While on, the heavy lane may run up to `afterburner_max_heavy` jobs (default cores - 2), still only as many as memory allows (new `mem_slots()`: the usual tiers, then `afterburner_extra_slot_gb` more per job); the light lane gets `afterburner_light_slots` (2); `heavyrun` uses `nice -n` `afterburner_nice` (10). `afterburner.json` carries `workers_per_agent` for agents. It drops back to normal by itself on memory pressure WARN, sustained load, low battery, an `afterburner_drop_apps` app in front or newly started, time up, or a stopped guard. The memory floors never change and dropping never touches a running job.
+- `heavyrun` reads the caps from `afterburner.py caps` every poll (fails safe to normal), uses `heavy.slot4` and up in afterburner, cleans stale slots left from an afterburner run, and logs the nice level. `timing_probe.py` counts jobs in every slot.
+- Graceful stop: a kill (critical memory or the stuck rule) now sends SIGTERM and waits up to `stop_grace_seconds` (30; `MEMGUARD_STOP_GRACE` overrides) for the job to save and exit before SIGKILL; 3 s when memory was already under `kill_avail_gb`, cut short under `stop_hard_avail_gb` (1.5). The log says `saved` or `forced`.
+- Tidy: new `tidy.py` and the `tidy` command: clean regenerable build output under the configured roots to one dated Trash folder with a manifest (never `rm`), push unpushed branches fast-forward only with a secrets check, back up verified git bundles plus an rsync of your folders to an attached drive as one light-lane `heavyrun` job, then one summary line. Everything it may touch comes from the new `tidy` block in `config.json`; the defaults push nothing and back up nothing.
+- Hangar: new optional SwiftUI menu-bar app in `hangar/` (an F-22 button for afterburner, Tidy, Save + push, Backup, Do all three) with `build.sh` and screenshots. Clicking the plane opens a window kept inside the visible screen area; opening the app again shows it centered. Tidy and Backup show the dry-run plan and wait for Confirm.
+- `install.sh` installs and links `afterburner` and `tidy`; `memguard.py --status` shows the afterburner state; `RULES.md` rules 13 (afterburner) and 14 (tidy).
+- Tests: 165 (34 new: afterburner, graceful stop, tidy on a scratch home, scratch volumes and a scratch Trash).
+
 ## 2026-10-21 (pid guard)
 
 - `sig()` never signals pid -1 (every process the user owns), 0 (memguard's own process group), 1 (launchd) or memguard itself, even if a job record were corrupted. Prompted by anthropics/claude-code#104156, where an agent script's `kill(-1, SIGKILL)` took down every session and the desktop.

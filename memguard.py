@@ -8,7 +8,8 @@ It only touches processes STARTED BY an agent session (some ancestor matches `se
 `heavyrun` queue wrapper. It never touches protected apps (browsers, the Claude app, Finder, system processes).
 
   available memory < pause_avail_gb   or pressure WARN      -> pause (SIGSTOP) the biggest session job
-  available memory < kill_avail_gb    or pressure CRITICAL  -> kill the biggest session job (SIGTERM, then SIGKILL)
+  available memory < kill_avail_gb    or pressure CRITICAL  -> stop the biggest session job (SIGTERM, up to stop_grace_seconds
+                                                             to save its work, then SIGKILL)
   more heavy jobs than the memory budget allows              -> pause the newer ones
   paused jobs resume one at a time once memory is back above resume_avail_gb
   stuck rule: low memory for stuck_seconds with jobs paused  -> stop the lowest-ranked paused job
@@ -21,6 +22,8 @@ It also acts as the dispatcher for the `heavyrun` queue: it decides which queued
 swap is high or the disk is nearly full. An optional manual_order file lets a UI drag-and-drop re-rank the queue.
 Timing lane: `HEAVY_TIMING=1 heavyrun ...` opens a quiet window (no new job starts) so a benchmark runs on a quiet machine.
 Usage-limit prompt: with a usage.json (see usagegate.py) it asks what to do when weekly Claude usage is high; your choice can hold the queue.
+Afterburner: `afterburner on 2h` (afterburner.py) raises the queue caps for a while (more heavy slots as memory allows, a second light
+slot, nice 10) and drops back by itself. The memory floors never change in any mode.
 
 Config: $MEMGUARD_CONFIG, else $MEMGUARD_HOME/config.json (default home: ~/.config/memguard). See config.example.json.
 Usage:  memguard.py            one pass (this is what launchd runs)
@@ -40,7 +43,13 @@ DEFAULTS = {
     "min_job_mb": 300,            # ignore session jobs smaller than this
     "second_ok_gb": 10, "second_pause_gb": 7,    # extra heavy jobs resume above / are paused below
     "slot2_avail_gb": 10, "slot3_avail_gb": 14,  # the 2nd / 3rd heavy job may start at this much available memory
-    "max_heavy_jobs": 3,          # at most this many heavy jobs keep running (heavyrun has 3 slots)
+    "max_heavy_jobs": 3,          # at most this many heavy jobs keep running (heavyrun has 3 slots; afterburner can add more)
+    # Stopping a job: SIGTERM, then up to stop_grace_seconds for it to save its work (a training run writing a checkpoint), then SIGKILL.
+    # The grace is only 3 s when memory was already under kill_avail_gb, and it is cut short if memory falls under stop_hard_avail_gb.
+    "stop_grace_seconds": 30, "stop_hard_avail_gb": 1.5,
+    # Afterburner (afterburner.py): while it is on, each heavy job past the 3rd needs this much more available memory
+    # (4th at slot3_avail_gb + 1 x this, 5th at + 2 x this ...). The other afterburner_* settings are read by afterburner.py.
+    "afterburner_extra_slot_gb": 3,
     "disk_hold_gb": 6.5,          # no NEW heavy job while disk free is below this
     # Swap: macOS keeps old swap long after memory pressure is gone, so swap alone would hold jobs for hours.
     # Hold only when swap is above swap_hard_gb, or above swap_hold_gb while available memory is under swap_low_avail_gb.
@@ -98,8 +107,28 @@ PRIORITY_RE = re.compile(CFG["priority_pattern"], re.I) if CFG["priority_pattern
 SESSION_RE = re.compile(CFG["session_pattern"])
 PROTECT = re.compile(CFG["protect_pattern"] + (("|" + CFG["protect_extra"]) if CFG["protect_extra"] else ""), re.I)
 HEADLESS = re.compile(CFG["headless_pattern"], re.I)
+STOP_GRACE = float(os.environ.get("MEMGUARD_STOP_GRACE", CFG["stop_grace_seconds"]))
+STOP_HARD_AVAIL = int(CFG["stop_hard_avail_gb"] * GB)
+EXTRA_SLOT_AVAIL = int(CFG["afterburner_extra_slot_gb"] * GB)
 DRY = False
 SELF_PID = os.getpid()
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try: import afterburner as AB   # optional; a broken or missing afterburner.py must never stop the guard
+except Exception: AB = None
+NORMAL_CAPS = dict(heavy_cap=3, light_slots=1, nice=15)
+
+def ab_caps():
+    """Queue caps in force: {heavy_cap, light_slots, nice}. Normal mode unless afterburner is on (and fresh)."""
+    try: return AB.caps(here=HERE) if AB else dict(NORMAL_CAPS)
+    except Exception: return dict(NORMAL_CAPS)
+
+def mem_slots(avail, cap=3):
+    """Heavy jobs memory allows at once: 1, 2nd at slot2_avail_gb, 3rd at slot3_avail_gb. With a cap above 3 (afterburner) each
+    further job needs afterburner_extra_slot_gb more. Never more than `cap`. With cap 3 this is exactly the normal tiers."""
+    n = 1 + (avail >= SLOT2_AVAIL) + (avail >= SLOT3_AVAIL)
+    while n < cap and n >= 3 and avail >= SLOT3_AVAIL + (n - 2) * EXTRA_SLOT_AVAIL: n += 1
+    return min(n, max(cap, 1))
 
 def g(b): return f"{b / GB:.1f} GB"
 
@@ -190,6 +219,26 @@ def sig(job, s):
         try: os.kill(p, s)
         except ProcessLookupError: pass
 
+def stop_job(job):
+    """SIGTERM, then wait up to STOP_GRACE s for the job to save and exit, then SIGKILL whatever is left. -> (how, seconds)"""
+    if DRY: return "dry-run", 0.0
+    sig(job, signal.SIGCONT); sig(job, signal.SIGTERM)
+    t0 = time.time(); a0, _ = mem()
+    grace = STOP_GRACE if a0 >= KILL_AVAIL else 3.0
+    while time.time() - t0 < grace:
+        alive = []
+        for p in job["pids"]:
+            if not isinstance(p, int) or p < 2 or p == os.getpid(): continue
+            try: os.kill(p, 0)
+            except (ProcessLookupError, PermissionError): continue
+            st = subprocess.run(["ps", "-o", "stat=", "-p", str(p)], capture_output=True, text=True).stdout.strip()
+            if st and not st.startswith("Z"): alive.append(p)   # an exited-but-unreaped (zombie) job counts as stopped
+        if not alive: return "saved", time.time() - t0
+        if mem()[0] < STOP_HARD_AVAIL: break
+        time.sleep(0.5)
+    sig(job, signal.SIGKILL)
+    return "forced", time.time() - t0
+
 def read_rank():
     """rank.txt: one label fragment per line, '#' comments, a line 'PARK' sends everything below it to the back."""
     rank, park = [], False
@@ -252,14 +301,18 @@ def main():
     except Exception: paused = []
     P = procs(); paused = [j for j in paused if j["root"] in P]
     avail, lvl = mem(); jobs = session_jobs(P)
+    # Afterburner: auto-off / drop check (time up, pressure, load, battery, drop apps). It never pauses or kills anything itself.
+    if AB and not DRY:
+        try: cap = AB.check(lvl, {p: c["cmd"] for p, c in P.items()}, here=HERE, log=log, notify=notify)["heavy_cap"]
+        except Exception as e: cap = NORMAL_CAPS["heavy_cap"]; log(f"afterburner check error: {e!r}")
+    else: cap = ab_caps()["heavy_cap"]
+    keep = max(MAX_HEAVY, mem_slots(avail, cap))   # heavy jobs allowed side by side; more only in afterburner, as memory allows
     pz = {j["root"] for j in paused}
     live = sorted([j for j in jobs if j["root"] not in pz], key=lambda j: -j["rss"])
     if (avail < KILL_AVAIL or lvl >= 4) and jobs:
-        j = max(jobs, key=lambda j: j["rss"]); sig(j, signal.SIGCONT); sig(j, signal.SIGTERM)
-        if not DRY: time.sleep(3)
-        sig(j, signal.SIGKILL)
+        j = max(jobs, key=lambda j: j["rss"]); how, took = stop_job(j)
         paused = [p for p in paused if p["root"] != j["root"]]
-        log(f"KILLED (available {g(avail)}, level {lvl}) pid {j['root']} {g(j['rss'])}: {j['cmd']}")
+        log(f"KILLED (available {g(avail)}, level {lvl}) pid {j['root']} {g(j['rss'])} [{how} after {took:.1f} s]: {j['cmd']}")
         notify(f"Stopped a {g(j['rss'])} background job to keep the Mac running")
     elif (avail < PAUSE_AVAIL or should_pause_at_level(avail, lvl, len(live))) and pausable_jobs(live, P, avail):
         j = pausable_jobs(live, P, avail)[0]; sig(j, signal.SIGSTOP); paused.append(j)
@@ -268,15 +321,14 @@ def main():
     else:
         heavy = sorted([j for j in live if j["rss"] >= HEAVY], key=lambda j: secs(j["etime"]), reverse=True)
         # keep the oldest heavy job(s) running; pause the rest. With plenty of memory more than one may run.
-        keep = 1 if avail < SECOND_PAUSE else MAX_HEAVY
-        for j in heavy[keep:]:
+        for j in heavy[1 if avail < SECOND_PAUSE else keep:]:
             sig(j, signal.SIGSTOP); paused.append(j)
             log(f"QUEUED (too many heavy jobs) pid {j['root']} {g(j['rss'])}: {j['cmd']}")
         if paused and lvl == 2 and not live and CFG["level2_one_job"] and avail > PAUSE_AVAIL + L2_RESUME:
             # deadlock breaker: level 2 with nothing running would keep every job paused for good; smallest job first
             j = min(paused, key=lambda j: j["rss"]); paused.remove(j); sig(j, signal.SIGCONT)
             log(f"RESUMED one job at level 2 (available {g(avail)}) pid {j['root']}: {j['cmd']}")
-        elif paused and lvl == 1 and ((not heavy and avail > RESUME_AVAIL) or (len(heavy) < MAX_HEAVY and avail > SECOND_OK)):
+        elif paused and lvl == 1 and ((not heavy and avail > RESUME_AVAIL) or (len(heavy) < keep and avail > SECOND_OK)):
             j = paused.pop(0); sig(j, signal.SIGCONT)
             log(f"RESUMED (available {g(avail)}) pid {j['root']}: {j['cmd']}")
     # STUCK rule: pausing keeps a job's memory, so a pile of paused jobs can hold the Mac below the resume line forever.
@@ -302,12 +354,10 @@ def main():
                 pos = next((i for i, f in enumerate(rank) if f in lab), len(rank))
                 return (1, pos)
             j = max(paused, key=lambda j: (badness(j), j["rss"]))
-            sig(j, signal.SIGCONT); sig(j, signal.SIGTERM)
-            if not DRY: time.sleep(3)
-            sig(j, signal.SIGKILL)
+            how, took = stop_job(j)
             paused = [p for p in paused if p["root"] != j["root"]]
             stuck["last_kill"] = now
-            log(f"STOPPED (stuck: memory low {int(now - stuck['since'])} s with jobs paused) pid {j['root']} {g(j['rss'])} [{label_of(j) or 'no queue label'}]: {j['cmd']}")
+            log(f"STOPPED (stuck: memory low {int(now - stuck['since'])} s with jobs paused, {how} after {took:.1f} s) pid {j['root']} {g(j['rss'])} [{label_of(j) or 'no queue label'}]: {j['cmd']}")
             notify(f"Stopped a paused {g(j['rss'])} job to free memory")
     else:
         stuck = {}
@@ -376,7 +426,8 @@ def stall_alert(T, want_q, heavy_lane):
 # State: timing_window.json (the window), timing_hold (fresh while new starts are held; heavyrun's light lane reads it).
 TIMING_RE = re.compile(r"\[timing(?: max-wait (\d+)m)?\]", re.I)
 TIMING_HOLD = ""   # set by the heavy-lane dispatch, read by the light-lane dispatch in the same run
-SLOT_DIRS = ("heavy.lock", "heavy.slot2", "heavy.slot3", "light.lock", "light.slot2")
+HEAVY_SLOT_DIRS = ("heavy.lock",) + tuple(f"heavy.slot{i}" for i in range(2, (AB.MAX_HEAVY if AB else 3) + 1))   # slot4+ only in afterburner
+SLOT_DIRS = HEAVY_SLOT_DIRS + ("light.lock", "light.slot2")
 def is_timing(label): return bool(TIMING_RE.search(label))
 
 def running_labels():
@@ -480,7 +531,7 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
     elif heavy_lane: USAGE_HOLD = ""
     if heavy_lane:   # memory-budget slots
         avail, _ = mem()
-        allowed = 1 + (avail >= SLOT2_AVAIL) + (avail >= SLOT3_AVAIL)
+        allowed = mem_slots(avail, ab_caps()["heavy_cap"])   # afterburner may raise the cap; the memory tiers still decide
         # Swap lives on the same disk as everything else, so a full disk means no room to swap, which means a crash.
         # No NEW heavy job starts while the disk is nearly full or swap use is high.
         disk_free, swap_used = disk_and_swap()
@@ -494,7 +545,7 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
                 notify(f"Holding new big jobs: disk {g(disk_free)} free, swap {g(swap_used)}")
         elif os.path.exists(hold_f) and not DRY:
             os.remove(hold_f); log("HOLD lifted (disk and swap OK)")
-        running = sum(1 for s in ("heavy.lock", "heavy.slot2", "heavy.slot3") if os.path.isdir(os.path.join(HERE, s)))
+        running = sum(1 for s in HEAVY_SLOT_DIRS if os.path.isdir(os.path.join(HERE, s)))
         free = max(0, allowed - running)
         start = timing_gate(order, T, free)   # normally order[:free]; the timing lane may hold starts
         want_q = set(start)
@@ -503,7 +554,8 @@ def dispatch(lane="queue", hold="queue_hold", heavy_lane=True):
             with open(tmp, "w") as fh: fh.write("".join(f + "\n" for f in start))
             os.replace(tmp, os.path.join(HERE, "visible.txt"))
     else:
-        start = [f for f in order if is_priority(T[f][1])][:1] if TIMING_HOLD else order[:1]   # a timing window holds the light lane
+        light = ab_caps()["light_slots"]   # 1, or 2 in afterburner
+        start = [f for f in order if is_priority(T[f][1])][:1] if TIMING_HOLD else order[:light]   # a timing window holds the light lane
         want_q = set(start)
         # heavyrun re-creates its own ticket when the dispatcher parks it, so "first name in the folder" would ignore rank.txt and
         # manual_order. Light-lane waiters start only if named in visible_light.txt (heavyrun falls back to first-come if it is stale).
@@ -526,6 +578,8 @@ def status():
     print(f"available:   {g(avail)}   pressure level {lvl} (1 normal, 2 warn, 4 critical)")
     print(f"thresholds:  pause < {g(PAUSE_AVAIL)}, kill < {g(KILL_AVAIL)}, resume > {g(RESUME_AVAIL)}")
     d, s = disk_and_swap(); print(f"disk free:   {g(d)}   swap used {g(s)}")
+    c = ab_caps(); on = c != NORMAL_CAPS
+    print(f"afterburner: {'ON' if on else 'off'}   heavy lane up to {mem_slots(avail, c['heavy_cap'])} job(s) now, light lane {c['light_slots']}, nice {c['nice']}")
     for j in sorted(session_jobs(P), key=lambda j: -j["rss"]):
         print(f"  job pid {j['root']:>6}  {g(j['rss']):>8}  {j['cmd'][:90]}")
 

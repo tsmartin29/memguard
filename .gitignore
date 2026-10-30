@@ -18,3 +18,10 @@ usage.json
 usage_state.json
 usage_decision*.json
 usage_prompt*
+hangar/build/
+afterburner.json
+afterburner.json.tmp
+tidy_state.json
+tidy_drives.json
+tidy_backup_plan_*
+tidy.log
