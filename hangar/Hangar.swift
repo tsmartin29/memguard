@@ -243,6 +243,40 @@ struct Formation: View {   // three jets in a V: Alpha Strike
     }.foregroundStyle(LinearGradient(colors: [.red, .orange], startPoint: .bottom, endPoint: .top)).frame(width: 34, height: 34)
   }
 }
+// Call-sign icons, all drawn here (no image files), 38 pt like the jet.
+struct DropTank: View {   // Jettison: a bomb released and falling away, speed lines behind it
+  var body: some View {
+    let body = LinearGradient(colors: [Color(red: 0.58, green: 0.45, blue: 0.30), Color(red: 0.86, green: 0.70, blue: 0.42)], startPoint: .top, endPoint: .bottom)
+    ZStack {
+      ForEach(0..<3) { i in Capsule().fill(Color.secondary.opacity(0.5)).frame(width: CGFloat(10 - i * 2), height: 2.5)
+        .offset(x: -13, y: CGFloat(i - 1) * 6) }
+      Path { p in   // tail fins (box tail)
+        p.addLines([CGPoint(x: 0, y: 6), CGPoint(x: 8, y: 9), CGPoint(x: 8, y: 13), CGPoint(x: 0, y: 16)]); p.closeSubpath()
+      }.fill(Color(red: 0.50, green: 0.38, blue: 0.25)).frame(width: 22, height: 22).offset(x: 1, y: 0)
+      Ellipse().fill(body).frame(width: 27, height: 14).offset(x: 6)
+    }.frame(width: 38, height: 38).scaleEffect(1.15).rotationEffect(.degrees(35))
+  }
+}
+struct GearUp: View {   // Wheels Up: a landing-gear wheel with an up chevron
+  var body: some View {
+    ZStack {
+      Image(systemName: "chevron.up").font(.system(size: 15, weight: .black)).foregroundStyle(.blue).offset(y: -15)
+      Circle().stroke(Color.blue, lineWidth: 6).frame(width: 22, height: 22).offset(y: 5)
+      Circle().fill(Color.blue.opacity(0.85)).frame(width: 7, height: 7).offset(y: 5)
+      Rectangle().fill(Color.blue).frame(width: 3, height: 9).offset(y: -6)
+    }.frame(width: 38, height: 38)
+  }
+}
+struct FlightRecorder: View {   // Black Box: the orange flight recorder, carry handle on top, reflective stripes
+  var body: some View {
+    let orange = Color(red: 1.0, green: 0.48, blue: 0.10)
+    ZStack {
+      RoundedRectangle(cornerRadius: 3).stroke(orange, lineWidth: 3).frame(width: 14, height: 10).offset(y: -9)
+      RoundedRectangle(cornerRadius: 4).fill(orange).frame(width: 30, height: 20).offset(y: 5)
+      ForEach(0..<2) { i in Rectangle().fill(Color.white.opacity(0.9)).frame(width: 30, height: 2.5).offset(y: CGFloat(i) * 8 + 1) }
+    }.frame(width: 38, height: 38)
+  }
+}
 struct Sym: View {
   let name: String; let color: Color
   var body: some View { Image(systemName: name).font(.system(size: 28, weight: .semibold)).foregroundStyle(color).frame(height: 38) }
@@ -358,13 +392,13 @@ struct PanelView: View {
       HStack(spacing: 8) {
         Tile(title: "Afterburner", sub: m.st.ab ? "ON · \(hm(m.st.abLeft)) left\ntap to land" : "off · tap for 2 h\nmore power", tint: .orange,
              enabled: idle, glow: m.st.ab, action: { m.tap(.afterburner) }) { Jet(on: m.st.ab) }
-        Tile(title: "Jettison", sub: "old build files\nto the Trash", tint: .brown, enabled: idle, glow: false, action: { m.tap(.tidy) }) { Broom() }
+        Tile(title: "Jettison", sub: "old build files\nto the Trash", tint: .brown, enabled: idle, glow: false, action: { m.tap(.tidy) }) { DropTank() }
       }
       HStack(spacing: 8) {
         Tile(title: "Wheels Up", sub: "save + push\nall code to GitHub", tint: .blue, enabled: idle, glow: false, action: { m.tap(.save) }) {
-          Sym(name: "icloud.and.arrow.up.fill", color: .blue) }
+          GearUp() }
         Tile(title: "Black Box", sub: m.st.drive.map { "backup to \($0)" } ?? "no drive", tint: .teal, enabled: idle && m.st.drive != nil, glow: false,
-             action: { m.tap(.backup) }) { Sym(name: "externaldrive.fill", color: .teal) }
+             action: { m.tap(.backup) }) { FlightRecorder() }
           .help(m.st.drive == nil ? (m.st.driveWhy.isEmpty ? "No backup drive attached" : m.st.driveWhy) : "Bundles + files to \(m.st.drive!)")
       }
       Button(action: { m.tap(.all) }) {
