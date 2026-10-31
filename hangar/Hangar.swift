@@ -4,7 +4,7 @@ import ServiceManagement
 // Hangar: a menu-bar remote for memguard's own commands, with an F-22 button for afterburner. It runs these commands and shows their
 // result line, nothing else:
 //   afterburner on 2h / off  ·  tidy --only clean  ·  tidy --only save  ·  tidy --only backup  ·  tidy (all three)
-// Tidy, Backup and Broken Arrow (all three) first run `tidy --dry-run ...`, show that plan and wait for one Confirm. No network of its own, no admin
+// Jettison (tidy), Black Box (backup) and Alpha Strike (all three) first run `tidy --dry-run ...`, show that plan and wait for one Confirm. No network of its own, no admin
 // rights. "Open at login" is OFF until you switch it on in the panel (SMAppService). Build: ./build.sh  Screenshots: HANGAR_SHOT=<dir>.
 // The commands default to ~/.local/bin/tidy and ~/.local/bin/afterburner (install.sh links them there); HANGAR_TIDY and
 // HANGAR_AFTERBURNER override the paths. The Lanes tab reads the memguard directory from HANGAR_MEMGUARD_DIR, else MEMGUARD_HOME,
@@ -96,7 +96,7 @@ func readManualOrder() -> [String] {
 }
 func writeManualOrder(heavy: [LaneJob], light: [LaneJob]) {
   let rows = (heavy + light).filter { !$0.priority }.map { "\($0.ticket)\t\($0.label)" }
-  let body = "# Written by Hangar (Lanes tab, drag to reorder). One ticket name per line (text after a TAB is only the label). Read by memguard.py dispatch().\n" + rows.joined(separator: "\n") + "\n"
+  let body = "# Written by Hangar (Tower tab, drag to reorder). One ticket name per line (text after a TAB is only the label). Read by memguard.py dispatch().\n" + rows.joined(separator: "\n") + "\n"
   let tmp = MANUAL_ORDER + ".tmp"
   if (try? body.write(toFile: tmp, atomically: false, encoding: .utf8)) != nil { _ = rename(tmp, MANUAL_ORDER) }
 }
@@ -122,8 +122,8 @@ func parseStatus(_ s: String) -> Status? {
 }
 
 enum Act { case afterburner, tidy, save, backup, all
-  var title: String { switch self { case .afterburner: return "Afterburner"; case .tidy: return "Tidy"; case .save: return "Save + push"
-    case .backup: return "Backup"; case .all: return "Broken Arrow" } }
+  var title: String { switch self { case .afterburner: return "Afterburner"; case .tidy: return "Jettison"; case .save: return "Wheels Up"
+    case .backup: return "Black Box"; case .all: return "Alpha Strike" } }   // jet call-signs; Alpha Strike = every aircraft launches together
   var tidyArgs: [String] { switch self { case .tidy: return ["--only", "clean"]; case .save: return ["--only", "save"]
     case .backup: return ["--only", "backup"]; default: return [] } }
 }
@@ -233,6 +233,16 @@ struct Broom: View {
                                      startPoint: .topTrailing, endPoint: .bottomLeading)).frame(width: 38, height: 38)
   }
 }
+struct Formation: View {   // three jets in a V: Alpha Strike
+  var body: some View {
+    ZStack {
+      ForEach(0..<3) { i in
+        Image(systemName: "airplane").font(.system(size: i == 0 ? 15 : 11, weight: .bold)).rotationEffect(.degrees(-90))
+          .offset(x: i == 0 ? 0 : (i == 1 ? -11 : 11), y: i == 0 ? -6 : 7)
+      }
+    }.foregroundStyle(LinearGradient(colors: [.red, .orange], startPoint: .bottom, endPoint: .top)).frame(width: 34, height: 34)
+  }
+}
 struct Sym: View {
   let name: String; let color: Color
   var body: some View { Image(systemName: name).font(.system(size: 28, weight: .semibold)).foregroundStyle(color).frame(height: 38) }
@@ -283,7 +293,7 @@ struct PanelView: View {
         Spacer()
         Text(statusLine).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
       }
-      Picker("", selection: $m.tab) { Text("Controls").tag(0); Text("Lanes").tag(1) }.pickerStyle(.segmented).labelsHidden()
+      Picker("", selection: $m.tab) { Text("Cockpit").tag(0); Text("Tower").tag(1) }.pickerStyle(.segmented).labelsHidden()
       if m.tab == 1 { lanesView } else if let p = m.pending { confirm(p) } else { tiles }
       if m.busy != nil {
         HStack(spacing: 8) { ProgressView().controlSize(.small); Text(m.busyNote).font(.system(size: 11)).foregroundStyle(.secondary) }
@@ -348,21 +358,21 @@ struct PanelView: View {
       HStack(spacing: 8) {
         Tile(title: "Afterburner", sub: m.st.ab ? "ON · \(hm(m.st.abLeft)) left\ntap to land" : "off · tap for 2 h\nmore power", tint: .orange,
              enabled: idle, glow: m.st.ab, action: { m.tap(.afterburner) }) { Jet(on: m.st.ab) }
-        Tile(title: "Tidy", sub: "old build files\nto the Trash", tint: .brown, enabled: idle, glow: false, action: { m.tap(.tidy) }) { Broom() }
+        Tile(title: "Jettison", sub: "old build files\nto the Trash", tint: .brown, enabled: idle, glow: false, action: { m.tap(.tidy) }) { Broom() }
       }
       HStack(spacing: 8) {
-        Tile(title: "Save + push", sub: "all code\nto GitHub", tint: .blue, enabled: idle, glow: false, action: { m.tap(.save) }) {
+        Tile(title: "Wheels Up", sub: "save + push\nall code to GitHub", tint: .blue, enabled: idle, glow: false, action: { m.tap(.save) }) {
           Sym(name: "icloud.and.arrow.up.fill", color: .blue) }
-        Tile(title: "Backup", sub: m.st.drive.map { "to \($0)" } ?? "no drive", tint: .teal, enabled: idle && m.st.drive != nil, glow: false,
+        Tile(title: "Black Box", sub: m.st.drive.map { "backup to \($0)" } ?? "no drive", tint: .teal, enabled: idle && m.st.drive != nil, glow: false,
              action: { m.tap(.backup) }) { Sym(name: "externaldrive.fill", color: .teal) }
           .help(m.st.drive == nil ? (m.st.driveWhy.isEmpty ? "No backup drive attached" : m.st.driveWhy) : "Bundles + files to \(m.st.drive!)")
       }
       Button(action: { m.tap(.all) }) {
         HStack(spacing: 10) {
-          Image(systemName: "scope").font(.system(size: 20, weight: .semibold)).foregroundStyle(.red)   // every asset in at once
+          Formation()
           VStack(alignment: .leading, spacing: 1) {
-            Text("Broken Arrow").font(.system(size: 13, weight: .semibold))
-            Text(m.st.drive == nil ? "tidy → save → backup (skipped: no drive)" : "tidy → save → backup").font(.system(size: 10.5)).foregroundStyle(.secondary)
+            Text("Alpha Strike").font(.system(size: 13, weight: .semibold))
+            Text(m.st.drive == nil ? "all at once: jettison → wheels up → black box (no drive)" : "all at once: jettison → wheels up → black box").font(.system(size: 10.5)).foregroundStyle(.secondary)
           }
           Spacer()
         }

@@ -194,13 +194,13 @@ Start with `tidy --dry-run` after you fill in the `tidy` block; with the default
 <img src="hangar/shots/hangar_afterburner_on_dark.png" width="300" alt="Hangar with afterburner on, dark mode">
 </p>
 
-Hangar is a small SwiftUI menu-bar app: click the plane and a panel opens with an F-22 button for afterburner, a broom for Tidy, Save + push, Backup and a red Broken Arrow button that does all three. The Controls buttons only run `afterburner` and `tidy` and show their result line. Tidy, Backup and Broken Arrow first show the `--dry-run` plan and wait for one Confirm. The plane in the menu bar shows the time left while afterburner is on.
+Hangar is a small SwiftUI menu-bar app: click the plane and a panel opens with an F-22 button for afterburner and jet call-signs for the rest: **Jettison** (tidy, a broom), **Wheels Up** (save + push), **Black Box** (backup) and a red-orange **Alpha Strike** button (three jets in a V) that does all three at once. The Cockpit buttons only run `afterburner` and `tidy` and show their result line. Jettison, Black Box and Alpha Strike first show the `--dry-run` plan and wait for one Confirm. The plane in the menu bar shows the time left while afterburner is on.
 
-A segmented Controls / Lanes picker at the top switches to the **Lanes** tab: the heavy and light lanes with their running slots (pid check, run time), the queued and held tickets (priority jobs marked with a star) and the last few `heavy_queue.log` lines, refreshed every 5 seconds while the panel is open. **Drag a queued job** to reorder it: Hangar writes memguard's `manual_order` file (ticket names, one per line), memguard uses it on its next pass, and priority tickets always stay first. The Lanes tab reads the memguard directory from `HANGAR_MEMGUARD_DIR`, else `MEMGUARD_HOME`, else `~/.config/memguard`.
+A segmented Cockpit / Tower picker at the top switches to the **Tower** tab: the heavy and light lanes with their running slots (pid check, run time), the queued and held tickets (priority jobs marked with a star) and the last few `heavy_queue.log` lines, refreshed every 5 seconds while the panel is open. **Drag a queued job** to reorder it: Hangar writes memguard's `manual_order` file (ticket names, one per line), memguard uses it on its next pass, and priority tickets always stay first. The Tower tab reads the memguard directory from `HANGAR_MEMGUARD_DIR`, else `MEMGUARD_HOME`, else `~/.config/memguard`.
 
 <p>
-<img src="hangar/shots/hangar_lanes_light.png" width="300" alt="Hangar Lanes tab, light mode">
-<img src="hangar/shots/hangar_lanes_dark.png" width="300" alt="Hangar Lanes tab, dark mode">
+<img src="hangar/shots/hangar_lanes_light.png" width="300" alt="Hangar Tower tab, light mode">
+<img src="hangar/shots/hangar_lanes_dark.png" width="300" alt="Hangar Tower tab, dark mode">
 </p>
 
 ```bash
