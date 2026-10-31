@@ -194,14 +194,21 @@ Start with `tidy --dry-run` after you fill in the `tidy` block; with the default
 <img src="hangar/shots/hangar_afterburner_on_dark.png" width="300" alt="Hangar with afterburner on, dark mode">
 </p>
 
-Hangar is a small SwiftUI menu-bar app: click the plane and a panel opens with an F-22 button for afterburner, a broom for Tidy, Save + push, Backup and "Do all three". It only runs `afterburner` and `tidy` and shows their result line. Tidy, Backup and "Do all three" first show the `--dry-run` plan and wait for one Confirm. The plane in the menu bar shows the time left while afterburner is on.
+Hangar is a small SwiftUI menu-bar app: click the plane and a panel opens with an F-22 button for afterburner, a broom for Tidy, Save + push, Backup and a red Broken Arrow button that does all three. The Controls buttons only run `afterburner` and `tidy` and show their result line. Tidy, Backup and Broken Arrow first show the `--dry-run` plan and wait for one Confirm. The plane in the menu bar shows the time left while afterburner is on.
+
+A segmented Controls / Lanes picker at the top switches to the **Lanes** tab: the heavy and light lanes with their running slots (pid check, run time), the queued and held tickets (priority jobs marked with a star) and the last few `heavy_queue.log` lines, refreshed every 5 seconds while the panel is open. **Drag a queued job** to reorder it: Hangar writes memguard's `manual_order` file (ticket names, one per line), memguard uses it on its next pass, and priority tickets always stay first. The Lanes tab reads the memguard directory from `HANGAR_MEMGUARD_DIR`, else `MEMGUARD_HOME`, else `~/.config/memguard`.
+
+<p>
+<img src="hangar/shots/hangar_lanes_light.png" width="300" alt="Hangar Lanes tab, light mode">
+<img src="hangar/shots/hangar_lanes_dark.png" width="300" alt="Hangar Lanes tab, dark mode">
+</p>
 
 ```bash
 hangar/build.sh                 # builds and installs ~/Applications/Hangar.app (an old copy goes to the Trash)
 hangar/build.sh --no-install    # build only, into hangar/build (or HANGAR_OUT=<dir>)
 ```
 
-Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs no admin rights. Clicking the plane opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the panel. `HANGAR_TIDY` and `HANGAR_AFTERBURNER` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>` renders the screenshots in `hangar/shots/` offscreen, without a menu-bar item; the ones here were taken with a sample config.
+Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs no admin rights. Clicking the plane opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the panel. `HANGAR_TIDY` and `HANGAR_AFTERBURNER` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>` renders the screenshots in `hangar/shots/` offscreen, without a menu-bar item; the ones here were taken with a sample config and a made-up queue (`HANGAR_MEMGUARD_DIR` pointed at a scratch folder).
 
 ### Tuning for your Mac
 

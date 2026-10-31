@@ -4,10 +4,11 @@ import ServiceManagement
 // Hangar: a menu-bar remote for memguard's own commands, with an F-22 button for afterburner. It runs these commands and shows their
 // result line, nothing else:
 //   afterburner on 2h / off  ·  tidy --only clean  ·  tidy --only save  ·  tidy --only backup  ·  tidy (all three)
-// Tidy, Backup and Everything first run `tidy --dry-run ...`, show that plan and wait for one Confirm. No network of its own, no admin
+// Tidy, Backup and Broken Arrow (all three) first run `tidy --dry-run ...`, show that plan and wait for one Confirm. No network of its own, no admin
 // rights. "Open at login" is OFF until you switch it on in the panel (SMAppService). Build: ./build.sh  Screenshots: HANGAR_SHOT=<dir>.
 // The commands default to ~/.local/bin/tidy and ~/.local/bin/afterburner (install.sh links them there); HANGAR_TIDY and
-// HANGAR_AFTERBURNER override the paths.
+// HANGAR_AFTERBURNER override the paths. The Lanes tab reads the memguard directory from HANGAR_MEMGUARD_DIR, else MEMGUARD_HOME,
+// else ~/.config/memguard.
 
 let HOMEDIR = NSHomeDirectory()
 let ENV = ProcessInfo.processInfo.environment
@@ -31,6 +32,76 @@ func summaryLine(_ out: String) -> String {
   return lines.last ?? "done"
 }
 
+// ---------------------------------------------------------------- lanes tab
+// Read-only view of memguard's queue: running slots (heavy.lock, heavy.slotN, light.lock, light.slot2: pid + label) and waiting tickets
+// (queue, queue_hold, queue_light, queue_light_hold: one file per job holding its label; "0-" prefix = priority), plus the last log lines.
+// The memguard directory: HANGAR_MEMGUARD_DIR, else MEMGUARD_HOME (what memguard itself uses), else ~/.config/memguard.
+let MGDIR = ENV["HANGAR_MEMGUARD_DIR"] ?? ENV["MEMGUARD_HOME"] ?? (HOMEDIR + "/.config/memguard")
+struct LaneJob: Identifiable { let id: String; let label: String; let secs: Int; let alive: Bool; let priority: Bool; let held: Bool; var ticket: String = "" }
+struct Lanes { var heavyRun = [LaneJob](), heavyQ = [LaneJob](), lightRun = [LaneJob](), lightQ = [LaneJob](), recent = [String](), paused = 0 }
+func readLanes() -> Lanes {
+  let fm = FileManager.default, now = Date()
+  func text(_ p: String) -> String { ((try? String(contentsOfFile: p, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+  func age(_ p: String) -> Int {
+    guard let d = (try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date else { return 0 }
+    return max(0, Int(now.timeIntervalSince(d)))
+  }
+  let names = ((try? fm.contentsOfDirectory(atPath: MGDIR)) ?? []).sorted()
+  func slots(_ pfx: [String]) -> [LaneJob] {
+    names.filter { n in pfx.contains { n.hasPrefix($0) } }.compactMap { n in
+      let d = MGDIR + "/" + n; var isDir: ObjCBool = false
+      guard fm.fileExists(atPath: d, isDirectory: &isDir), isDir.boolValue else { return nil }
+      let pid = Int32(text(d + "/pid")) ?? 0
+      let lab = text(d + "/label")
+      return LaneJob(id: n, label: lab.isEmpty ? "(no label)" : lab, secs: age(d), alive: pid > 1 && kill(pid, 0) == 0, priority: false, held: false)
+    }
+  }
+  var manual = [String: Int]()
+  for (i, line) in readManualOrder().enumerated() { if manual[line] == nil { manual[line] = i } }
+  func queue(_ dirs: [String]) -> [LaneJob] {
+    dirs.flatMap { q -> [LaneJob] in
+      let d = MGDIR + "/" + q
+      return ((try? fm.contentsOfDirectory(atPath: d)) ?? []).map { f in
+        LaneJob(id: q + "/" + f, label: text(d + "/" + f), secs: age(d + "/" + f), alive: true, priority: f.hasPrefix("0-"), held: q.hasSuffix("_hold"), ticket: f)
+      }
+    }.sorted { a, b in
+      let ka = (a.priority ? 0 : 1, manual[a.ticket] ?? Int.max, a.ticket), kb = (b.priority ? 0 : 1, manual[b.ticket] ?? Int.max, b.ticket)
+      return ka < kb
+    }
+  }
+  var l = Lanes()
+  l.heavyRun = slots(["heavy.lock", "heavy.slot"]); l.lightRun = slots(["light.lock", "light.slot"])
+  l.heavyQ = queue(["queue", "queue_hold"]); l.lightQ = queue(["queue_light", "queue_light_hold"])
+  if let d = try? Data(contentsOf: URL(fileURLWithPath: MGDIR + "/paused.json")), let a = (try? JSONSerialization.jsonObject(with: d)) as? [Any] { l.paused = a.count }
+  if let h = FileHandle(forReadingAtPath: MGDIR + "/heavy_queue.log") {
+    let size = (try? h.seekToEnd()) ?? 0
+    try? h.seek(toOffset: size > 4096 ? size - 4096 : 0)
+    let tail = String(decoding: h.readDataToEndOfFile(), as: UTF8.self)
+    l.recent = Array(tail.split(separator: "\n").map { line -> String in
+      let t = String(line); let parts = t.split(separator: " ", maxSplits: 1)   // drop the date, keep "HH:MM:SS EVENT label"
+      return parts.count == 2 && parts[0].count == 10 ? String(parts[1]) : t
+    }.suffix(6).reversed())
+    try? h.close()
+  }
+  return l
+}
+// manual_order: memguard's dispatcher reads ticket names one per line (text after a TAB is only a label) and lets the listed tickets
+// swap among the places they already hold; priority ("0-" / priority_pattern) tickets never move. Hangar writes it when you drag a row.
+let MANUAL_ORDER = MGDIR + "/manual_order"
+func readManualOrder() -> [String] {
+  ((try? String(contentsOfFile: MANUAL_ORDER, encoding: .utf8)) ?? "").split(separator: "\n").compactMap { l in
+    let t = l.trimmingCharacters(in: .whitespaces)
+    return t.isEmpty || t.hasPrefix("#") ? nil : String(t.split(whereSeparator: { $0 == " " || $0 == "\t" }).first ?? "")
+  }
+}
+func writeManualOrder(heavy: [LaneJob], light: [LaneJob]) {
+  let rows = (heavy + light).filter { !$0.priority }.map { "\($0.ticket)\t\($0.label)" }
+  let body = "# Written by Hangar (Lanes tab, drag to reorder). One ticket name per line (text after a TAB is only the label). Read by memguard.py dispatch().\n" + rows.joined(separator: "\n") + "\n"
+  let tmp = MANUAL_ORDER + ".tmp"
+  if (try? body.write(toFile: tmp, atomically: false, encoding: .utf8)) != nil { _ = rename(tmp, MANUAL_ORDER) }
+}
+func dur(_ s: Int) -> String { s >= 3600 ? "\(s / 3600)h \(s % 3600 / 60)m" : s >= 60 ? "\(s / 60)m" : "\(s)s" }
+
 struct Status {
   var memFree: Int? = nil, load = 0.0, ab = false, abLeft = 0, drive: String? = nil, driveWhy = "", diskFree: Double? = nil
   var lastTidy: Double? = nil, lastSave: Double? = nil, lastBackup: Double? = nil, loaded = false
@@ -52,7 +123,7 @@ func parseStatus(_ s: String) -> Status? {
 
 enum Act { case afterburner, tidy, save, backup, all
   var title: String { switch self { case .afterburner: return "Afterburner"; case .tidy: return "Tidy"; case .save: return "Save + push"
-    case .backup: return "Backup"; case .all: return "Everything" } }
+    case .backup: return "Backup"; case .all: return "Broken Arrow" } }
   var tidyArgs: [String] { switch self { case .tidy: return ["--only", "clean"]; case .save: return ["--only", "save"]
     case .backup: return ["--only", "backup"]; default: return [] } }
 }
@@ -65,12 +136,21 @@ final class Model: ObservableObject {
   @Published var result = ""
   @Published var pending: Pending? = nil
   @Published var loginOn = SMAppService.mainApp.status == .enabled
+  @Published var tab = 0
+  @Published var lanes = Lanes()
+  func moveQueued(heavy: Bool, from: IndexSet, to: Int) {
+    if heavy { lanes.heavyQ.move(fromOffsets: from, toOffset: to) } else { lanes.lightQ.move(fromOffsets: from, toOffset: to) }
+    writeManualOrder(heavy: lanes.heavyQ, light: lanes.lightQ)
+    result = "Queue order saved; memguard uses it on its next pass (priority jobs stay first)."
+  }
+  func refreshLanes() { DispatchQueue.global(qos: .utility).async { let l = readLanes(); DispatchQueue.main.async { self.lanes = l } } }
 
   func refresh() {
     DispatchQueue.global(qos: .userInitiated).async {
       let (_, out) = runTool(TIDY, ["--status"])
       if let s = parseStatus(out) { DispatchQueue.main.async { self.st = s } }
     }
+    refreshLanes()
   }
   func tap(_ a: Act) {
     guard busy == nil else { return }
@@ -203,7 +283,8 @@ struct PanelView: View {
         Spacer()
         Text(statusLine).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
       }
-      if let p = m.pending { confirm(p) } else { tiles }
+      Picker("", selection: $m.tab) { Text("Controls").tag(0); Text("Lanes").tag(1) }.pickerStyle(.segmented).labelsHidden()
+      if m.tab == 1 { lanesView } else if let p = m.pending { confirm(p) } else { tiles }
       if m.busy != nil {
         HStack(spacing: 8) { ProgressView().controlSize(.small); Text(m.busyNote).font(.system(size: 11)).foregroundStyle(.secondary) }
       }
@@ -222,6 +303,45 @@ struct PanelView: View {
     }
     .padding(14).frame(width: 344)
   }
+  func laneRow(_ j: LaneJob, running: Bool) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 6) {
+      Circle().fill(running ? (j.alive ? Color.green : Color.red) : (j.held ? Color.gray : Color.orange)).frame(width: 7, height: 7)
+      Text((j.priority ? "★ " : "") + j.label).font(.system(size: 11)).lineLimit(2).truncationMode(.tail)
+      Spacer(minLength: 4)
+      Text(running ? (j.alive ? dur(j.secs) : "dead") : (j.held ? "held \(dur(j.secs))" : "waiting \(dur(j.secs))"))
+        .font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+    }
+  }
+  func lane(_ title: String, _ run: [LaneJob], _ q: [LaneJob], heavy: Bool) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text("\(title) · \(run.count) running · \(q.count) queued").font(.system(size: 11.5, weight: .semibold))
+      if run.isEmpty && q.isEmpty { Text("idle").font(.system(size: 11)).foregroundStyle(.secondary) }
+      ForEach(run) { laneRow($0, running: true) }
+      if !q.isEmpty {
+        List {
+          ForEach(q) { j in laneRow(j, running: false).moveDisabled(j.priority) }
+            .onMove { from, to in m.moveQueued(heavy: heavy, from: from, to: to) }
+        }
+        .listStyle(.plain).scrollContentBackground(.hidden).frame(height: min(CGFloat(q.count) * 24 + 4, 168))
+        Text("Drag queued jobs to change the order. ★ priority jobs stay first.").font(.system(size: 9.5)).foregroundStyle(.secondary)
+      }
+    }
+  }
+  var lanesView: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      lane("Heavy lane", m.lanes.heavyRun, m.lanes.heavyQ, heavy: true)
+      lane("Light lane", m.lanes.lightRun, m.lanes.lightQ, heavy: false)
+      if m.lanes.paused > 0 { Text("\(m.lanes.paused) job(s) paused by memguard (memory)").font(.system(size: 10.5)).foregroundStyle(.orange) }
+      if !m.lanes.recent.isEmpty {
+        Text("Recent").font(.system(size: 11.5, weight: .semibold))
+        ForEach(Array(m.lanes.recent.enumerated()), id: \.offset) { _, line in
+          Text(line).font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .onAppear { m.refreshLanes() }
+  }
   var tiles: some View {
     let idle = m.busy == nil
     return VStack(spacing: 8) {
@@ -239,16 +359,16 @@ struct PanelView: View {
       }
       Button(action: { m.tap(.all) }) {
         HStack(spacing: 10) {
-          Image(systemName: "sparkles").font(.system(size: 20, weight: .semibold)).foregroundStyle(.purple)
+          Image(systemName: "scope").font(.system(size: 20, weight: .semibold)).foregroundStyle(.red)   // every asset in at once
           VStack(alignment: .leading, spacing: 1) {
-            Text("Do all three").font(.system(size: 13, weight: .semibold))
+            Text("Broken Arrow").font(.system(size: 13, weight: .semibold))
             Text(m.st.drive == nil ? "tidy → save → backup (skipped: no drive)" : "tidy → save → backup").font(.system(size: 10.5)).foregroundStyle(.secondary)
           }
           Spacer()
         }
         .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 50)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.purple.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.purple.opacity(0.28)))
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.red.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.red.opacity(0.28)))
         .contentShape(RoundedRectangle(cornerRadius: 12))
       }.buttonStyle(.plain).disabled(!idle).opacity(idle ? 1 : 0.45)
     }
@@ -326,7 +446,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     NSApp.activate(ignoringOtherApps: true); w.makeKeyAndOrderFront(nil)
     timer?.invalidate()
     timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in self.model.refresh(); self.updateIcon() }
+    lanesTimer?.invalidate()
+    lanesTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in if self.win?.isVisible == true { self.model.refreshLanes() } }
   }
+  var lanesTimer: Timer?
   // Opening the app again (Finder/Spotlight) shows the panel centered, in case the menu bar plane is hidden behind the notch.
   var win: NSWindow?
   func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows: Bool) -> Bool { showWindow(nil); return false }
@@ -352,7 +475,8 @@ enum Shots {
     let conf = Model(); conf.st = live.st
     let (_, plan) = runTool(TIDY, ["--dry-run", "--only", "clean"])
     conf.pending = Pending(act: .tidy, plan: plan.trimmingCharacters(in: .whitespacesAndNewlines), summary: summaryLine(plan))
-    let cases: [(String, Model)] = [("panel", live), ("afterburner_on", ab), ("confirm_tidy", conf)]
+    let ln = Model(); ln.st = live.st; ln.tab = 1; ln.lanes = readLanes()
+    let cases: [(String, Model)] = [("panel", live), ("afterburner_on", ab), ("confirm_tidy", conf), ("lanes", ln)]
     var jobs = [(Model, String, String)]()
     for (n, mdl) in cases { for ap in ["light", "dark"] { jobs.append((mdl, ap, "\(dir)/hangar_\(n)_\(ap).png")) } }
     func step(_ i: Int) {
