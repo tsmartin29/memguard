@@ -1,0 +1,5 @@
+#!/bin/bash
+# scramble on [duration, default 8h] [reason] | off | status   (see scramble.py and README "Scramble")
+# Usually a symlink in ~/.local/bin; scramble.py lives next to the real file.
+DIR="$(/usr/bin/python3 -I -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0" 2>/dev/null || dirname "$0")"
+exec /usr/bin/python3 -I "$DIR/scramble.py" "$@"

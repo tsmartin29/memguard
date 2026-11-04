@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-11-03
+- Scramble mode: `scramble on/off/status` (keep every agent slot filled from a queue file), Hangar Scramble tile, install links it.
+
 ## 2026-10-30 (afterburner, tidy, Hangar)
 
 - Afterburner: new `afterburner.py` and the `afterburner` command (`on [2h] [reason]`, `off`, `status`, `caps`). While on, the heavy lane may run up to `afterburner_max_heavy` jobs (default cores - 2), still only as many as memory allows (new `mem_slots()`: the usual tiers, then `afterburner_extra_slot_gb` more per job); the light lane gets `afterburner_light_slots` (2); `heavyrun` uses `nice -n` `afterburner_nice` (10). `afterburner.json` carries `workers_per_agent` for agents. It drops back to normal by itself on memory pressure WARN, sustained load, low battery, an `afterburner_drop_apps` app in front or newly started, time up, or a stopped guard. The memory floors never change and dropping never touches a running job.

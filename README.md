@@ -214,6 +214,14 @@ Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. T
 
 The defaults suit a 24 GB machine: pause under 6 GB available, kill under 3 GB, resume over 9 GB. On 16 GB try `pause_avail_gb 4`, `kill_avail_gb 2`, `resume_avail_gb 6`, `slot2_avail_gb 8`, `slot3_avail_gb 12`. To force a strict one-at-a-time queue set `max_heavy_jobs` to 1 and `slot2_avail_gb` very high. Run `--dry-run` for a day to see what it would have done.
 
+## Scramble
+
+`scramble on [8h] [reason]`, `scramble off`, `scramble status`. A standing order for an orchestrating agent session (e.g. Claude Code):
+keep every agent slot filled. The target defaults to 20 (Claude Code's concurrent-subagent cap; `SCRAMBLE_TARGET` changes it), and
+the session refills each slot from the newest `AGENT_QUEUE_*.md` in `SCRAMBLE_QUEUE_DIR` (default `~/.config/memguard`) as agents
+finish. Afterburner gives the machine more muscle (heavy-lane caps); Scramble keeps all agent slots busy. Memory floors and every
+memguard rule stay as they are. It turns itself off when the time is up. Hangar has a Scramble tile.
+
 ## Known limits
 
 - Pausing a job keeps its memory; macOS can swap it out, but it is not freed. That is what the "stuck" rule is for.

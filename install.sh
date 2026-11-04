@@ -20,11 +20,11 @@ case "${1:-}" in
 esac
 
 mkdir -p "$DEST" "$HOME/Library/LaunchAgents" "$HOME/.local/bin"
-FILES="memguard.py heavyrun timing_probe.py usagegate.py usage_statusline.py afterburner.py afterburner tidy.py tidy"
+FILES="memguard.py heavyrun timing_probe.py usagegate.py usage_statusline.py afterburner.py afterburner scramble.py scramble tidy.py tidy"
 for f in $FILES; do cp "$HERE/$f" "$DEST/"; chmod +x "$DEST/$f"; done
 [ -e "$DEST/config.json" ] || cp "$HERE/config.example.json" "$DEST/config.json"
 [ -e "$DEST/rank.txt" ]    || cp "$HERE/rank.example.txt"    "$DEST/rank.txt"
-for f in heavyrun afterburner tidy; do ln -sf "$DEST/$f" "$HOME/.local/bin/$f"; done
+for f in heavyrun afterburner scramble tidy; do ln -sf "$DEST/$f" "$HOME/.local/bin/$f"; done
 render > "$PLIST"; plutil -lint "$PLIST" >/dev/null
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"

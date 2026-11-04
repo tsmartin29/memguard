@@ -14,6 +14,7 @@ let HOMEDIR = NSHomeDirectory()
 let ENV = ProcessInfo.processInfo.environment
 let TIDY = ENV["HANGAR_TIDY"] ?? (HOMEDIR + "/.local/bin/tidy")
 let AFTERBURNER = ENV["HANGAR_AFTERBURNER"] ?? (HOMEDIR + "/.local/bin/afterburner")
+let SCRAMBLE = ENV["HANGAR_SCRAMBLE"] ?? (HOMEDIR + "/.local/bin/scramble")   // keep every agent slot filled
 
 func runTool(_ path: String, _ args: [String]) -> (Int32, String) {
   let p = Process()
@@ -103,6 +104,7 @@ func writeManualOrder(heavy: [LaneJob], light: [LaneJob]) {
 func dur(_ s: Int) -> String { s >= 3600 ? "\(s / 3600)h \(s % 3600 / 60)m" : s >= 60 ? "\(s / 60)m" : "\(s)s" }
 
 struct Status {
+  var sc = false, scLeft = 0
   var memFree: Int? = nil, load = 0.0, ab = false, abLeft = 0, drive: String? = nil, driveWhy = "", diskFree: Double? = nil
   var lastTidy: Double? = nil, lastSave: Double? = nil, lastBackup: Double? = nil, loaded = false
 }
@@ -121,8 +123,8 @@ func parseStatus(_ s: String) -> Status? {
   return st
 }
 
-enum Act { case afterburner, tidy, save, backup, all
-  var title: String { switch self { case .afterburner: return "Afterburner"; case .tidy: return "Jettison"; case .save: return "Wheels Up"
+enum Act { case afterburner, scramble, tidy, save, backup, all
+  var title: String { switch self { case .afterburner: return "Afterburner"; case .scramble: return "Scramble"; case .tidy: return "Jettison"; case .save: return "Wheels Up"
     case .backup: return "Black Box"; case .all: return "Alpha Strike" } }   // jet call-signs; Alpha Strike = every aircraft launches together
   var tidyArgs: [String] { switch self { case .tidy: return ["--only", "clean"]; case .save: return ["--only", "save"]
     case .backup: return ["--only", "backup"]; default: return [] } }
@@ -148,7 +150,11 @@ final class Model: ObservableObject {
   func refresh() {
     DispatchQueue.global(qos: .userInitiated).async {
       let (_, out) = runTool(TIDY, ["--status"])
-      if let s = parseStatus(out) { DispatchQueue.main.async { self.st = s } }
+      let (_, so) = runTool(SCRAMBLE, ["status"])
+      var sc = false, scLeft = 0
+      if let line = so.split(separator: "\n").last(where: { $0.hasPrefix("{") }), let d = line.data(using: .utf8),
+         let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { sc = j["scramble"] as? Bool ?? false; scLeft = j["scramble_left_min"] as? Int ?? 0 }
+      if var s = parseStatus(out) { s.sc = sc; s.scLeft = scLeft; DispatchQueue.main.async { self.st = s } }
     }
     refreshLanes()
   }
@@ -156,6 +162,7 @@ final class Model: ObservableObject {
     guard busy == nil else { return }
     switch a {
     case .afterburner: run(a, AFTERBURNER, st.ab ? ["off", "turned off in Hangar"] : ["on", "2h", "Hangar button"])
+    case .scramble: run(a, SCRAMBLE, st.sc ? ["off", "turned off in Hangar"] : ["on", "8h", "Hangar button"])
     case .save: run(a, TIDY, a.tidyArgs)
     case .tidy, .backup, .all: preview(a)
     }
@@ -225,6 +232,21 @@ struct BroomShape: Shape {   // a broom, 100 x 100
     p.addLines([pt(40, 50), pt(64, 64), pt(60, 70), pt(36, 56)]); p.closeSubpath()                        // binding
     p.addLines([pt(34, 58), pt(60, 73), pt(48, 98), pt(8, 82)]); p.closeSubpath()                         // bristles
     return p
+  }
+}
+struct ScrambleIcon: View {   // Scramble: two jets climbing out together, speed lines behind
+  var on: Bool
+  var body: some View {
+    ZStack {
+      ForEach(0..<2, id: \.self) { i in
+        JetShape().fill(on ? Color.green : Color.primary.opacity(0.8), style: FillStyle(eoFill: true))
+          .frame(width: 20, height: 20).rotationEffect(.degrees(35)).offset(x: CGFloat(i * 12 - 6), y: CGFloat(6 - i * 10))
+      }
+      ForEach(0..<3, id: \.self) { k in
+        Capsule().fill(Color.secondary.opacity(0.5)).frame(width: 8, height: 1.5).rotationEffect(.degrees(35))
+          .offset(x: CGFloat(-16 + k * 5), y: CGFloat(14 - k * 3))
+      }
+    }.frame(width: 40, height: 40)
   }
 }
 struct Broom: View {
@@ -392,11 +414,15 @@ struct PanelView: View {
       HStack(spacing: 8) {
         Tile(title: "Afterburner", sub: m.st.ab ? "ON · \(hm(m.st.abLeft)) left\ntap to land" : "off · tap for 2 h\nmore power", tint: .orange,
              enabled: idle, glow: m.st.ab, action: { m.tap(.afterburner) }) { Jet(on: m.st.ab) }
-        Tile(title: "Jettison", sub: "old build files\nto the Trash", tint: .brown, enabled: idle, glow: false, action: { m.tap(.tidy) }) { DropTank() }
+        Tile(title: "Scramble", sub: m.st.sc ? "ON · \(hm(m.st.scLeft)) left\n20 agents · tap to land" : "off · tap for 8 h\nall 20 agents flying", tint: .green,
+             enabled: idle, glow: m.st.sc, action: { m.tap(.scramble) }) { ScrambleIcon(on: m.st.sc) }
       }
       HStack(spacing: 8) {
+        Tile(title: "Jettison", sub: "old build files\nto the Trash", tint: .brown, enabled: idle, glow: false, action: { m.tap(.tidy) }) { DropTank() }
         Tile(title: "Wheels Up", sub: "save + push\nall code to GitHub", tint: .blue, enabled: idle, glow: false, action: { m.tap(.save) }) {
           GearUp() }
+      }
+      HStack(spacing: 8) {
         Tile(title: "Black Box", sub: m.st.drive.map { "backup to \($0)" } ?? "no drive", tint: .teal, enabled: idle && m.st.drive != nil, glow: false,
              action: { m.tap(.backup) }) { FlightRecorder() }
           .help(m.st.drive == nil ? (m.st.driveWhy.isEmpty ? "No backup drive attached" : m.st.driveWhy) : "Bundles + files to \(m.st.drive!)")
