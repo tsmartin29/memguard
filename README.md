@@ -203,12 +203,19 @@ A segmented Cockpit / Tower picker at the top switches to the **Tower** tab: the
 <img src="hangar/shots/hangar_lanes_dark.png" width="300" alt="Hangar Tower tab, dark mode">
 </p>
 
+**Queue tab (optional, off until you set a file).** Set `HANGAR_QUEUE_FILE` to a markdown task list, or to a glob such as `~/notes/AGENT_QUEUE_*.md` (the newest name wins, so dated files roll over by themselves), and a third **Queue** segment appears: the running count, the queued count, the next three queued jobs, and when the file was last modified. The "updated" line turns amber with a warning icon when the file is more than 45 minutes old, which is the cue that whatever refreshes it has stopped. Unset, the tab does not exist. The tab is read-only (it never writes the file), makes no network calls, and re-reads at most once a minute, and only while the panel is open on that tab. The file format is two tables: rows under a `## Running` heading whose first cell is `R<id>` count as running, rows under `## Queued` whose first cell is `Q<id>` count as queued, in file order; `~~struck~~` rows, other sections and prose are ignored. `tests/fixtures/agent_queue_sample.md` is a small example.
+
+<p>
+<img src="hangar/shots/hangar_queue_light.png" width="300" alt="Hangar Queue tab, light mode">
+<img src="hangar/shots/hangar_queue_stale_dark.png" width="300" alt="Hangar Queue tab with a stale file, dark mode">
+</p>
+
 ```bash
 hangar/build.sh                 # builds and installs ~/Applications/Hangar.app (an old copy goes to the Trash)
 hangar/build.sh --no-install    # build only, into hangar/build (or HANGAR_OUT=<dir>)
 ```
 
-Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs no admin rights. Clicking the plane opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the panel. `HANGAR_TIDY` and `HANGAR_AFTERBURNER` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>` renders the screenshots in `hangar/shots/` offscreen, without a menu-bar item; the ones here were taken with a sample config and a made-up queue (`HANGAR_MEMGUARD_DIR` pointed at a scratch folder).
+Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs no admin rights. Clicking the plane opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the panel. `HANGAR_TIDY`, `HANGAR_AFTERBURNER` and `HANGAR_SCRAMBLE` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>` renders the screenshots in `hangar/shots/` offscreen, without a menu-bar item; the ones here were taken with a sample config and a made-up queue (`HANGAR_MEMGUARD_DIR` pointed at a scratch folder).
 
 ### Tuning for your Mac
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-04 (Hangar Queue tab)
+- Hangar: optional **Queue** tab. Set `HANGAR_QUEUE_FILE` (a file or a glob such as `~/notes/AGENT_QUEUE_*.md`, newest name wins) and it shows the running count, the queued count, the next three queued jobs and the file's age, amber when older than 45 minutes. It parses the `## Running` and `## Queued` markdown tables (`R<id>` / `Q<id>` rows, struck-through rows skipped). Read-only, no network, re-read at most every 60 s while the tab is open. With the variable unset there is no Queue tab.
+- `HANGAR_QUEUE_PARSE=<file>` prints the parser's result as JSON and exits (used by the tests).
+- Tests: `tests/test_hangar_queue.py` (7, compiles `Hangar.swift` into a scratch folder; skipped without `swiftc`) and a sample file in `tests/fixtures/`.
+
 ## 2026-11-04 (Scramble modes)
 - Scramble now has agent-count modes: `scramble cap` (CAP, 12), `scramble on` (Scramble, 20, unchanged), `scramble surge` (25) and `scramble set N` (Custom, 1 to 40), each with an optional `[duration] [reason]`. `scramble.json` gains `mode` next to `target_agents`; `status` prints `mode`, `disk_free_gb` and `disk_low` in its JSON line.
 - Disk safety: under 10 GB free, `status` warns; Surge and Custom above 20 refuse to turn on and print why. CAP, Scramble and Custom up to 20 still start, with the warning.

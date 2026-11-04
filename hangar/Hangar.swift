@@ -103,6 +103,58 @@ func writeManualOrder(heavy: [LaneJob], light: [LaneJob]) {
 }
 func dur(_ s: Int) -> String { s >= 3600 ? "\(s / 3600)h \(s % 3600 / 60)m" : s >= 60 ? "\(s / 60)m" : "\(s)s" }
 
+// ---------------------------------------------------------------- queue tab (Nov 4, 2026: the COO's agent queue, read-only)
+// Reads the newest AGENT_QUEUE_*.md and shows running count, queued count, the top 3 queued items and how old the file is
+// (amber when older than 45 min; the file is refreshed about every 30 min). Parses the markdown tables under "## Running" and "## Queued":
+// rows whose first cell is R<id> / Q<id>; struck-through ~~Q0~~ rows are skipped. Read-only, no network, re-read at most every 60 s.
+// HANGAR_QUEUE_FILE is a file path or a glob such as ~/notes/AGENT_QUEUE_*.md (newest name wins). Unset = no Queue tab.
+let QUEUE_PATTERN: String? = ENV["HANGAR_QUEUE_FILE"]
+let QUEUE_STALE_SECS = 45 * 60
+let QUEUE_MIN_REREAD = 60.0
+struct QItem: Identifiable { let id: String; let text: String }
+struct QueueInfo { var found = false, name = "", running = 0, queued = 0, top = [QItem](), mtime: Date? = nil }
+func queueCells(_ line: String) -> [String] {
+  var c = line.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+  if c.first == "" { c.removeFirst() }
+  if c.last == "" { c.removeLast() }
+  return c
+}
+func queueClean(_ s: String) -> String { s.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "") }
+func isQueueId(_ s: String, _ letter: Character) -> Bool {
+  guard s.first == letter, s.count >= 2 else { return false }
+  return s.dropFirst().allSatisfy { $0.isLetter || $0.isNumber }
+}
+func parseQueue(_ md: String) -> (running: Int, queued: [QItem]) {
+  var sect = 0, running = 0, queued = [QItem]()
+  for raw in md.split(separator: "\n", omittingEmptySubsequences: true) {
+    let line = raw.trimmingCharacters(in: .whitespaces)
+    if line.hasPrefix("#") {
+      let l = line.lowercased()
+      sect = l.hasPrefix("## ") && l.contains("running") ? 1 : (l.hasPrefix("## ") && l.contains("queued") ? 2 : 0)
+      continue
+    }
+    guard sect != 0, line.hasPrefix("|") else { continue }
+    let c = queueCells(line)
+    guard c.count >= 2, !c[1].hasPrefix("~~") else { continue }   // struck-through rows start with ~~ and fail the id test too
+    if sect == 1, isQueueId(c[0], "R") { running += 1 }
+    if sect == 2, isQueueId(c[0], "Q") { queued.append(QItem(id: c[0], text: queueClean(c[1]))) }
+  }
+  return (running, queued)
+}
+func newestQueueFile(_ pattern: String) -> String? {
+  let p = (pattern as NSString).expandingTildeInPath
+  guard p.contains("*") || p.contains("?") else { return FileManager.default.fileExists(atPath: p) ? p : nil }
+  let dir = (p as NSString).deletingLastPathComponent, pat = (p as NSString).lastPathComponent
+  let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { fnmatch(pat, $0, 0) == 0 }.sorted()
+  return names.last.map { dir + "/" + $0 }   // dated names (AGENT_QUEUE_2026-11-04.md) sort oldest to newest
+}
+func readQueue() -> QueueInfo {
+  guard let pat = QUEUE_PATTERN, let path = newestQueueFile(pat), let text = try? String(contentsOfFile: path, encoding: .utf8) else { return QueueInfo() }
+  let r = parseQueue(text)
+  let m = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+  return QueueInfo(found: true, name: (path as NSString).lastPathComponent, running: r.running, queued: r.queued.count, top: Array(r.queued.prefix(3)), mtime: m)
+}
+
 struct Status {
   var sc = false, scLeft = 0, scMode = "scramble", scTarget = 20, scDiskLow = false, scDiskGB: Double? = nil   // Nov 4: CAP 12 / Scramble 20 / Surge 25 / Custom 1-40
   var memFree: Int? = nil, load = 0.0, ab = false, abLeft = 0, drive: String? = nil, driveWhy = "", diskFree: Double? = nil
@@ -142,10 +194,19 @@ final class Model: ObservableObject {
   @Published var scPick = "scramble"   // mode a tap launches when Scramble is off
   @Published var customN = 20
   @Published var lanes = Lanes()
+  @Published var queue = QueueInfo()
+  var queueRead = Date.distantPast
+  @Published var queueTick = Date()   // bumped on every read so the "updated N min ago" line redraws
   func moveQueued(heavy: Bool, from: IndexSet, to: Int) {
     if heavy { lanes.heavyQ.move(fromOffsets: from, toOffset: to) } else { lanes.lightQ.move(fromOffsets: from, toOffset: to) }
     writeManualOrder(heavy: lanes.heavyQ, light: lanes.lightQ)
     result = "Queue order saved; memguard uses it on its next pass (priority jobs stay first)."
+  }
+  /// Re-reads the agent queue file at most once a minute (force skips the wait); off the main thread, no network.
+  func refreshQueue(force: Bool = false) {
+    guard QUEUE_PATTERN != nil, force || Date().timeIntervalSince(queueRead) >= QUEUE_MIN_REREAD else { return }
+    queueRead = Date()
+    DispatchQueue.global(qos: .utility).async { let q = readQueue(); DispatchQueue.main.async { self.queue = q; self.queueTick = Date() } }
   }
   func refreshLanes() { DispatchQueue.global(qos: .utility).async { let l = readLanes(); DispatchQueue.main.async { self.lanes = l } } }
 
@@ -423,8 +484,8 @@ struct PanelView: View {
         Spacer()
         Text(statusLine).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
       }
-      Picker("", selection: $m.tab) { Text("Cockpit").tag(0); Text("Tower").tag(1) }.pickerStyle(.segmented).labelsHidden()
-      if m.tab == 1 { lanesView } else if let p = m.pending { confirm(p) } else { tiles }
+      Picker("", selection: $m.tab) { Text("Cockpit").tag(0); Text("Tower").tag(1); if QUEUE_PATTERN != nil { Text("Queue").tag(2) } }.pickerStyle(.segmented).labelsHidden()
+      if m.tab == 2 && QUEUE_PATTERN != nil { queueView } else if m.tab == 1 { lanesView } else if let p = m.pending { confirm(p) } else { tiles }
       if m.busy != nil {
         HStack(spacing: 8) { ProgressView().controlSize(.small); Text(m.busyNote).font(.system(size: 11)).foregroundStyle(.secondary) }
       }
@@ -466,6 +527,51 @@ struct PanelView: View {
         Text("Drag queued jobs to change the order. ★ priority jobs stay first.").font(.system(size: 9.5)).foregroundStyle(.secondary)
       }
     }
+  }
+  /// Queue tab: two count tiles, the next three queued jobs, and how fresh the file is (amber when older than 45 min).
+  var queueView: some View {
+    let q = m.queue
+    let age = q.mtime.map { Int(max(0, m.queueTick.timeIntervalSince($0))) }
+    let stale = q.found && (age ?? 0) > QUEUE_STALE_SECS
+    let tint: Color = stale ? AMBER : .secondary
+    func count(_ n: Int, _ label: String, _ c: Color) -> some View {
+      VStack(spacing: 2) {
+        Text(q.found ? "\(n)" : "–").font(.system(size: 30, weight: .bold, design: .rounded)).monospacedDigit()
+        Text(label).font(.system(size: 10.5)).foregroundStyle(.secondary)
+      }
+      .frame(maxWidth: .infinity, minHeight: 72)
+      .background(RoundedRectangle(cornerRadius: 12).fill(c.opacity(0.10)))
+      .overlay(RoundedRectangle(cornerRadius: 12).stroke(c.opacity(0.28)))
+    }
+    return VStack(alignment: .leading, spacing: 8) {
+      HStack(spacing: 8) { count(q.running, "running", .green); count(q.queued, "queued", .blue) }
+      VStack(alignment: .leading, spacing: 5) {
+        Text(q.top.isEmpty ? (q.found ? "Nothing queued" : "No queue file found") : "Next up").font(.system(size: 11.5, weight: .semibold))
+        ForEach(q.top) { it in
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(it.id).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(.blue).frame(width: 24, alignment: .leading)
+            Text(it.text).font(.system(size: 11)).lineLimit(2).truncationMode(.tail).fixedSize(horizontal: false, vertical: true)
+          }
+        }
+      }
+      .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+      .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.06)))
+      .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.blue.opacity(0.2)))
+      if q.found, let t = q.mtime {
+        HStack(spacing: 6) {
+          Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock").font(.system(size: 10)).foregroundStyle(stale ? AMBER : Color.secondary)
+          Text("Updated \(ago(t.timeIntervalSince1970))" + (stale ? " · stale" : "")).lineLimit(1)
+            .font(.system(size: 10.5, weight: stale ? .semibold : .regular)).foregroundStyle(stale ? AMBER : Color.secondary)
+          Spacer(minLength: 4)
+          Text(q.name).font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6).frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 8).fill(tint.opacity(stale ? 0.18 : 0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(stale ? 0.6 : 0.15)))
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .onAppear { if ENV["HANGAR_SHOT"] == nil { m.refreshQueue(force: true) } }
   }
   var lanesView: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -590,7 +696,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     timer?.invalidate()
     timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in self.model.refresh(); self.updateIcon() }
     lanesTimer?.invalidate()
-    lanesTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in if self.win?.isVisible == true { self.model.refreshLanes() } }
+    lanesTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in if self.win?.isVisible == true { self.model.refreshLanes(); if self.model.tab == 2 { self.model.refreshQueue() } } }
   }
   var lanesTimer: Timer?
   // Opening the app again (Finder/Spotlight) shows the panel centered, in case the menu bar plane is hidden behind the notch.
@@ -621,7 +727,9 @@ enum Shots {
     let ln = Model(); ln.st = live.st; ln.tab = 1; ln.lanes = readLanes()
     let sc1 = Model(); sc1.st = live.st; sc1.st.sc = true; sc1.st.scLeft = 262; sc1.st.scMode = "surge"; sc1.st.scTarget = 25; sc1.st.scDiskLow = false
     let sc2 = Model(); sc2.st = live.st; sc2.st.sc = false; sc2.scPick = "custom"; sc2.customN = 14; sc2.st.scDiskLow = true; sc2.st.scDiskGB = 4.2
-    let cases: [(String, Model)] = [("panel", live), ("afterburner_on", ab), ("confirm_tidy", conf), ("lanes", ln), ("scramble_surge_on", sc1), ("scramble_custom_disklow", sc2)]
+    let q1 = Model(); q1.st = live.st; q1.tab = 2; q1.queue = readQueue(); q1.queue.mtime = Date().addingTimeInterval(-12 * 60)
+    let q2 = Model(); q2.st = live.st; q2.tab = 2; q2.queue = q1.queue; q2.queue.mtime = Date().addingTimeInterval(-62 * 60)
+    let cases: [(String, Model)] = [("queue", q1), ("queue_stale", q2), ("panel", live), ("afterburner_on", ab), ("confirm_tidy", conf), ("lanes", ln), ("scramble_surge_on", sc1), ("scramble_custom_disklow", sc2)]
     var jobs = [(Model, String, String)]()
     for (n, mdl) in cases { for ap in ["light", "dark"] { jobs.append((mdl, ap, "\(dir)/hangar_\(n)_\(ap).png")) } }
     func step(_ i: Int) {
@@ -639,6 +747,12 @@ enum Shots {
   }
 }
 
+// Parser check without a window: HANGAR_QUEUE_PARSE=<file> prints running, queued and the first ids as JSON and exits.
+if let f = ENV["HANGAR_QUEUE_PARSE"] {
+  let r = parseQueue((try? String(contentsOfFile: f, encoding: .utf8)) ?? "")
+  let j: [String: Any] = ["running": r.running, "queued": r.queued.count, "ids": r.queued.map { $0.id }, "top": r.queued.prefix(3).map { $0.text }]
+  print(String(decoding: (try? JSONSerialization.data(withJSONObject: j)) ?? Data(), as: UTF8.self)); exit(0)
+}
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
