@@ -231,3 +231,9 @@ memguard rule stay as they are. It turns itself off when the time is up. Hangar 
 ## Licence
 
 MIT. See `LICENSE`.
+
+## Autosave every 5 minutes
+
+Set `MEMGUARD_AUTOSAVE_CMD` in the launchd job's environment to a command that snapshots or commits your work (for example, a script that
+commits each repo's working tree to an autosave branch). memguard starts it in the background every `MEMGUARD_AUTOSAVE_SECS` (default 300).
+The command should take its own lock so overlapping runs exit quietly. Agents should still write partial results to disk as they go.

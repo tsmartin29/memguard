@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-11-03
+- Autosave: memguard can run your snapshot command every 5 minutes (MEMGUARD_AUTOSAVE_CMD, MEMGUARD_AUTOSAVE_SECS).
 - Scramble mode: `scramble on/off/status` (keep every agent slot filled from a queue file), Hangar Scramble tile, install links it.
 
 ## 2026-10-30 (afterburner, tidy, Hangar)

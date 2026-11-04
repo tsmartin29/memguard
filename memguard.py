@@ -296,7 +296,25 @@ def pausable_jobs(live, P, avail):
     if avail < PAUSE_AVAIL or not CFG.get("protect_priority_jobs", True): return live
     return [j for j in live if not under_priority_ticket(j, P)]
 
+AUTOSAVE_EVERY = int(os.environ.get("MEMGUARD_AUTOSAVE_SECS", "300"))   # 0 turns it off
+AUTOSAVE_CMD = os.environ.get("MEMGUARD_AUTOSAVE_CMD", "")             # a command that snapshots/commits your work
+def autosave_tick(now=None):
+    """Every AUTOSAVE_EVERY seconds start AUTOSAVE_CMD in the background (if set). The command should take its own lock;
+    a failure here never stops the guard."""
+    if not AUTOSAVE_CMD or AUTOSAVE_EVERY <= 0: return False
+    stamp = os.path.join(HERE, "autosave.last"); now = now or time.time()
+    try: last = os.path.getmtime(stamp)
+    except OSError: last = 0
+    if now - last < AUTOSAVE_EVERY: return False
+    open(stamp, "w").write(time.strftime("%Y-%m-%d %H:%M:%S\n"))
+    cmd = [os.path.expanduser(x) for x in AUTOSAVE_CMD.split()]
+    subprocess.Popen(["nice", "-n", "15"] + cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return True
+
 def main():
+    try:
+        if autosave_tick(): log("autosave: started")
+    except Exception as e: log(f"autosave error: {e!r}")
     try: paused = json.load(open(STATE))
     except Exception: paused = []
     P = procs(); paused = [j for j in paused if j["root"] in P]
