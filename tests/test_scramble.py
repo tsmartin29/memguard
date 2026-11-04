@@ -19,7 +19,7 @@ class Modes(unittest.TestCase):
     def status_json(self): return json.loads(self.run_cli("status")[1].strip().splitlines()[-1])
 
     def test_counts(self):
-        for cmd, mode, n in [("cap", "cap", 12), ("on", "scramble", 20), ("surge", "surge", 25)]:
+        for cmd, mode, n in [("cap", "cap", 12), ("on", "scramble", 20), ("surge", "surge", 25), ("cas", "cas", 30), ("warthog", "cas", 30)]:
             rc, _ = self.run_cli(cmd); st = self.state()
             self.assertEqual((rc, st["on"], st["mode"], st["target_agents"]), (0, True, mode, n))
     def test_on_still_means_20_and_keeps_duration_and_reason(self):
@@ -45,8 +45,10 @@ class Modes(unittest.TestCase):
         self.run_cli("set", "17", "3h"); j = self.status_json()
         self.assertEqual((j["scramble"], j["target_agents"], j["mode"], j["disk_low"], j["disk_free_gb"]), (True, 17, "custom", False, 50.0))
         self.assertGreater(j["scramble_left_min"], 170)
+    def test_warthog_state_file_reads_as_cas(self):   # a state written under the first name still resolves
+        S.save({"on": True, "mode": "warthog", "since": 1, "until": 9e12, "target_agents": 30}); self.assertEqual(self.status_json()["mode"], "cas")
     def test_legacy_state_without_mode(self):   # the file written before Nov 4 has no "mode"
-        for n, mode in [(20, "scramble"), (12, "cap"), (25, "surge"), (7, "custom")]:
+        for n, mode in [(20, "scramble"), (12, "cap"), (25, "surge"), (30, "cas"), (7, "custom")]:
             S.save({"on": True, "since": 1, "until": 9e12, "target_agents": n}); self.assertEqual(self.status_json()["mode"], mode)
 
 class DiskSafety(unittest.TestCase):
@@ -66,7 +68,7 @@ class DiskSafety(unittest.TestCase):
         self.assertNotIn("WARNING", out); self.assertFalse(json.loads(out.strip().splitlines()[-1])["disk_low"])
     def test_surge_and_custom_above_20_refuse_when_low(self):
         os.environ["SCRAMBLE_FREE_GB"] = "9.9"
-        for args in (("surge",), ("set", "21"), ("set", "40")):
+        for args in (("surge",), ("cas",), ("warthog",), ("set", "21"), ("set", "40")):
             rc, out = self.run_cli(*args); self.assertEqual(rc, 1, args); self.assertIn("REFUSED", out); self.assertIn("9.9 GB", out)
         self.assertFalse(S.load().get("on"))
     def test_refusal_does_not_change_a_running_state(self):

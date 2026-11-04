@@ -217,6 +217,41 @@ hangar/build.sh --no-install    # build only, into hangar/build (or HANGAR_OUT=<
 
 Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs no admin rights. Clicking the plane opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the panel. `HANGAR_TIDY`, `HANGAR_AFTERBURNER` and `HANGAR_SCRAMBLE` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>` renders the screenshots in `hangar/shots/` offscreen, without a menu-bar item; the ones here were taken with a sample config and a made-up queue (`HANGAR_MEMGUARD_DIR` pointed at a scratch folder).
 
+### Screen animations
+
+Each Hangar action plays one short animation across the main screen when you take it (about 2 to 3.5 seconds, once per action, never on launch,
+refresh or a timer, and never more than one per 20 seconds). Everything is drawn in the app (vector shapes and CoreAnimation) and the sound is
+synthesised sample by sample in code: no image files, no recorded audio. The overlay is a transparent, click-through window that never takes focus;
+Reduce Motion skips it. The panel has two switches, **Animations** and **Flyover sound** (both on by default); the sound follows the system volume and mute.
+
+| Action | Animation |
+|---|---|
+| Afterburner ON | a fighter streaks across with both plumes lit, a vapor collar swells around it, then pops with a double-crack sonic boom |
+| Jettison | a fighter crosses, the drop tank releases, tumbles and falls off the bottom of the screen (whoosh, light clunk) |
+| Wheels Up | a carrier launch seen from above: steam along the catapult, the jet is slung off the bow, dips, climbs out and folds its gear |
+| Black Box | the orange flight recorder drops in, bounces and pings its locator beacon with ripple rings (gentle beeps) |
+| Alpha Strike | a three-ship V sweeps across (one combined pass) |
+| CAP / Scramble / Surge | a 2-, 4- or 6-ship formation pass |
+| Close Air Support (30) | an A-10 dives from the top-left toward the bottom-right with a gun burst, pulls up; fireballs, smoke and booms bloom at the bottom-right |
+
+While the mode is Close Air Support (or the target is 30 or more) the menu bar shows a small A-10 silhouette next to the plane, a monochrome
+template image that follows light and dark menu bars. Mode animations fire when `scramble.json` shows a real switch (off to a mode, or one mode to
+another, from the CLI or the tile); renewing the same mode is silent.
+
+<p>
+<img src="hangar/shots/hangar_menubar_a10_zoom_light.png" width="420" alt="menu bar: plane and A-10, light">
+<img src="hangar/shots/hangar_scramble_cas_on_dark.png" width="220" alt="Close Air Support tile, dark">
+</p>
+<img src="hangar/shots/hangar_anim_dive.png" width="900" alt="Close Air Support dive, frame strip">
+<img src="hangar/shots/hangar_anim_afterburner.png" width="900" alt="Afterburner sonic boom, frame strip">
+<img src="hangar/shots/hangar_anim_wheels.png" width="900" alt="Wheels Up carrier launch, frame strip">
+
+More strips and short clips (`anim_<scene>.mp4`, no sound) are in `hangar/shots/`. They are rendered **offscreen**: `HANGAR_SHOT=<dir>` builds each scene
+in a window parked far off screen, steps it frame by frame and writes `<dir>/anim/<scene>/fNNN.png` plus a strip per scene, so nothing ever plays on
+your display while testing. To hear or see one for real: `HANGAR_FLYOVER=<dive|afterburner|jettison|wheels|blackbox|alpha|cap|scramble|surge>
+~/Applications/Hangar.app/Contents/MacOS/Hangar` plays it once and exits (`HANGAR_FLYOVER_SOUND=off` mutes it); `HANGAR_FLYOVER_WAV=<file>` writes the
+scene's sound to a WAV instead. Tests: `tests/test_hangar_animations.py`.
+
 ### Tuning for your Mac
 
 The defaults suit a 24 GB machine: pause under 6 GB available, kill under 3 GB, resume over 9 GB. On 16 GB try `pause_avail_gb 4`, `kill_avail_gb 2`, `resume_avail_gb 6`, `slot2_avail_gb 8`, `slot3_avail_gb 12`. To force a strict one-at-a-time queue set `max_heavy_jobs` to 1 and `slot2_avail_gb` very high. Run `--dry-run` for a day to see what it would have done.
@@ -233,16 +268,17 @@ off when the time is up (default 8 h).
 | `scramble cap [duration] [reason]` | CAP (combat air patrol) | 12 |
 | `scramble on [duration] [reason]` | Scramble | 20 (`SCRAMBLE_TARGET` changes what `on` means) |
 | `scramble surge [duration] [reason]` | Surge | 25 |
+| `scramble cas [duration] [reason]` | Close Air Support (CAS; `warthog` is an alias) | 30 |
 | `scramble set N [duration] [reason]` | Custom | any N from 1 to 40 |
 | `scramble off` / `scramble status` | | |
 
 `scramble.json` holds `{on, mode, target_agents, since, until, reason, queue}`; the session reads `target_agents` to know how many agents to keep
 running. `scramble status` also prints a JSON line with `mode`, `disk_free_gb` and `disk_low`.
 
-Disk safety: with under 10 GB free, `status` prints a warning, and Surge or Custom above 20 refuse to turn on (the message says why), since more
+Disk safety: with under 10 GB free, `status` prints a warning, and Surge, Close Air Support or Custom above 20 refuse to turn on (the message says why), since more
 agents means more builds and caches. CAP, Scramble and Custom up to 20 still start, with the warning. `SCRAMBLE_FREE_GB` fakes the free-disk figure (tests).
 
-Hangar's Scramble tile is a mode picker in the same footprint: click the name for CAP 12 / Scramble 20 / Surge 25 / Custom (with a - / + stepper, 1 to 40) / Off;
+Hangar's Scramble tile is a mode picker in the same footprint: click the name for CAP 12 / Scramble 20 / Surge 25 / Close Air Support 30 / Custom (with a - / + stepper, 1 to 40) / Off;
 tap the tile to launch or land. Green glow when on, the label shows the count; amber with "disk low" under 10 GB free. Tests: `tests/test_scramble.py`.
 
 ## Known limits

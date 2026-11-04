@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-04 (Close Air Support and screen animations)
+- New Scramble mode **Close Air Support (CAS)**: `scramble cas` keeps 30 agents running (`scramble warthog` is kept as an alias; `scramble.json` mode `cas`). Same disk rule as Surge: refuses under 10 GB free. Custom stays 1 to 40. Tile menu item "Close Air Support · 30", tile label "CAS · 30".
+- Hangar menu bar: an original A-10 silhouette (vector, monochrome template image) sits next to the plane while the mode is CAS or the target is 30 or more.
+- Hangar screen animations, one per action, all drawn and synthesised in the app (no image files, no recorded audio): Afterburner (sonic boom), Jettison (drop tank), Wheels Up (carrier launch, gear up), Black Box (recorder and beacon pings), Alpha Strike (three-ship V), CAP / Scramble / Surge (2 / 4 / 6-ship passes) and CAS (A-10 dive, gun burst, fire and booms). Click-through, no focus, Reduce Motion skips them, once per action and at most one per 20 s. New panel switches **Animations** and **Flyover sound**.
+- `HANGAR_SHOT=<dir>` now also renders every scene offscreen (frame PNGs plus a strip per scene); `HANGAR_FLYOVER=<scene>` plays one for real and `HANGAR_FLYOVER_WAV=<file>` writes its sound to a WAV.
+- Tests: `tests/test_hangar_animations.py` (sound length, level and determinism per scene) and CAS cases in `tests/test_scramble.py`.
+
 ## 2026-11-04 (Hangar Queue tab)
 - Hangar: optional **Queue** tab. Set `HANGAR_QUEUE_FILE` (a file or a glob such as `~/notes/AGENT_QUEUE_*.md`, newest name wins) and it shows the running count, the queued count, the next three queued jobs and the file's age, amber when older than 45 minutes. It parses the `## Running` and `## Queued` markdown tables (`R<id>` / `Q<id>` rows, struck-through rows skipped). Read-only, no network, re-read at most every 60 s while the tab is open. With the variable unset there is no Queue tab.
 - `HANGAR_QUEUE_PARSE=<file>` prints the parser's result as JSON and exits (used by the tests).

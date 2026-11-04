@@ -4,6 +4,7 @@
   scramble cap [duration] [reason...]       CAP (combat air patrol): keep 12 agents running
   scramble on [duration] [reason...]        Scramble: keep 20 running (default duration 8h; `on` means 20, or SCRAMBLE_TARGET)
   scramble surge [duration] [reason...]     Surge: keep 25 running
+  scramble cas [duration] [reason...]       Close Air Support (CAS): keep 30 running (`warthog` is an alias)
   scramble set N [duration] [reason...]     Custom: keep N running, N from 1 to 40
   scramble off [reason...]
   scramble status                           mode, count, time left, queue file, free disk (warns under 10 GB)
@@ -11,7 +12,7 @@
 Scramble is a standing order to your orchestrating agent session, not a resource cap: Afterburner gives the Mac more muscle (heavy-lane caps);
 Scramble keeps the agent slots busy (target = the count above; 20 is the Claude Code concurrent-subagent default). Memory floors
 and memguard's rules are unchanged. It drops back to off by itself when the time is up.
-Disk safety: free disk under 10 GB prints a warning in `status`, and a count above 20 (Surge, or Custom 21-40) refuses to turn on
+Disk safety: free disk under 10 GB prints a warning in `status`, and a count above 20 (Surge, Close Air Support, or Custom 21-40) refuses to turn on
 until there is 10 GB free (more agents means more builds and caches).
 State: scramble.json {on, mode, since, until, reason, target_agents, queue}; your orchestrating session reads target_agents and mode.
 """
@@ -19,9 +20,9 @@ import json, os, re, shutil, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TARGET = int(os.environ.get("SCRAMBLE_TARGET", "20"))   # what `on` means; Claude Code concurrent-subagent cap by default
-MODES = {"cap": 12, "on": TARGET, "scramble": TARGET, "surge": 25}
-MODE_NAME = {"cap": "cap", "on": "scramble", "scramble": "scramble", "surge": "surge"}
-LABEL = {"cap": "CAP", "scramble": "Scramble", "surge": "Surge", "custom": "Custom"}
+MODES = {"cap": 12, "on": TARGET, "scramble": TARGET, "surge": 25, "cas": 30, "warthog": 30}   # warthog = the first name of CAS, kept as an alias
+MODE_NAME = {"cap": "cap", "on": "scramble", "scramble": "scramble", "surge": "surge", "cas": "cas", "warthog": "cas"}
+LABEL = {"cap": "CAP", "scramble": "Scramble", "surge": "Surge", "cas": "Close Air Support", "custom": "Custom"}
 MIN_N, MAX_N = 1, 40
 LOW_DISK_GB = 10        # warn under this; refuse counts above NORMAL_MAX under it
 NORMAL_MAX = 20
@@ -70,8 +71,9 @@ def disk_low(free=None):
 
 def mode_of(st):
     m = st.get("mode")
+    if m == "warthog": m = "cas"   # the first name of the 30-agent mode
     if m in LABEL: return m
-    return {12: "cap", 20: "scramble", 25: "surge"}.get(st.get("target_agents", TARGET), "custom")
+    return {12: "cap", 20: "scramble", 25: "surge", 30: "cas"}.get(st.get("target_agents", TARGET), "custom")
 
 def label(mode, n): return "%s %d" % (LABEL.get(mode, "Custom"), n)
 
@@ -113,7 +115,7 @@ def main(argv):
         free = disk_free_gb(); low = disk_low(free); n = st.get("target_agents", TARGET); mode = mode_of(st)
         if st.get("on"): print("scramble ON (%s), %d min left, target %d agents, queue %s" % (LABEL[mode], left_min(st), n, st.get("queue")))
         else: print("scramble off")
-        if low: print("WARNING: disk low, %.1f GB free (under %d GB). Surge and Custom above %d refuse to start until there is room." % (free, LOW_DISK_GB, NORMAL_MAX))
+        if low: print("WARNING: disk low, %.1f GB free (under %d GB). Surge, Close Air Support and Custom above %d refuse to start until there is room." % (free, LOW_DISK_GB, NORMAL_MAX))
         print(json.dumps({"scramble": bool(st.get("on")), "scramble_left_min": left_min(st), "target_agents": n, "mode": mode,
                           "disk_free_gb": None if free is None else round(free, 1), "disk_low": low}))
     return 0
