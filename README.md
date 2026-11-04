@@ -216,11 +216,27 @@ The defaults suit a 24 GB machine: pause under 6 GB available, kill under 3 GB, 
 
 ## Scramble
 
-`scramble on [8h] [reason]`, `scramble off`, `scramble status`. A standing order for an orchestrating agent session (e.g. Claude Code):
-keep every agent slot filled. The target defaults to 20 (Claude Code's concurrent-subagent cap; `SCRAMBLE_TARGET` changes it), and
-the session refills each slot from the newest `AGENT_QUEUE_*.md` in `SCRAMBLE_QUEUE_DIR` (default `~/.config/memguard`) as agents
-finish. Afterburner gives the machine more muscle (heavy-lane caps); Scramble keeps all agent slots busy. Memory floors and every
-memguard rule stay as they are. It turns itself off when the time is up. Hangar has a Scramble tile.
+A standing order for an orchestrating agent session (e.g. Claude Code): keep this many agents running, refilling each slot from the
+newest `AGENT_QUEUE_*.md` in `SCRAMBLE_QUEUE_DIR` (default `~/.config/memguard`) as agents finish. Afterburner gives the machine more
+muscle (heavy-lane caps); Scramble keeps the agent slots busy. Memory floors and every memguard rule stay as they are. It turns itself
+off when the time is up (default 8 h).
+
+| Command | Mode | Agents |
+|---|---|---|
+| `scramble cap [duration] [reason]` | CAP (combat air patrol) | 12 |
+| `scramble on [duration] [reason]` | Scramble | 20 (`SCRAMBLE_TARGET` changes what `on` means) |
+| `scramble surge [duration] [reason]` | Surge | 25 |
+| `scramble set N [duration] [reason]` | Custom | any N from 1 to 40 |
+| `scramble off` / `scramble status` | | |
+
+`scramble.json` holds `{on, mode, target_agents, since, until, reason, queue}`; the session reads `target_agents` to know how many agents to keep
+running. `scramble status` also prints a JSON line with `mode`, `disk_free_gb` and `disk_low`.
+
+Disk safety: with under 10 GB free, `status` prints a warning, and Surge or Custom above 20 refuse to turn on (the message says why), since more
+agents means more builds and caches. CAP, Scramble and Custom up to 20 still start, with the warning. `SCRAMBLE_FREE_GB` fakes the free-disk figure (tests).
+
+Hangar's Scramble tile is a mode picker in the same footprint: click the name for CAP 12 / Scramble 20 / Surge 25 / Custom (with a - / + stepper, 1 to 40) / Off;
+tap the tile to launch or land. Green glow when on, the label shows the count; amber with "disk low" under 10 GB free. Tests: `tests/test_scramble.py`.
 
 ## Known limits
 

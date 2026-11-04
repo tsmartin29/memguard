@@ -104,7 +104,7 @@ func writeManualOrder(heavy: [LaneJob], light: [LaneJob]) {
 func dur(_ s: Int) -> String { s >= 3600 ? "\(s / 3600)h \(s % 3600 / 60)m" : s >= 60 ? "\(s / 60)m" : "\(s)s" }
 
 struct Status {
-  var sc = false, scLeft = 0
+  var sc = false, scLeft = 0, scMode = "scramble", scTarget = 20, scDiskLow = false, scDiskGB: Double? = nil   // Nov 4: CAP 12 / Scramble 20 / Surge 25 / Custom 1-40
   var memFree: Int? = nil, load = 0.0, ab = false, abLeft = 0, drive: String? = nil, driveWhy = "", diskFree: Double? = nil
   var lastTidy: Double? = nil, lastSave: Double? = nil, lastBackup: Double? = nil, loaded = false
 }
@@ -139,6 +139,8 @@ final class Model: ObservableObject {
   @Published var pending: Pending? = nil
   @Published var loginOn = SMAppService.mainApp.status == .enabled
   @Published var tab = 0
+  @Published var scPick = "scramble"   // mode a tap launches when Scramble is off
+  @Published var customN = 20
   @Published var lanes = Lanes()
   func moveQueued(heavy: Bool, from: IndexSet, to: Int) {
     if heavy { lanes.heavyQ.move(fromOffsets: from, toOffset: to) } else { lanes.lightQ.move(fromOffsets: from, toOffset: to) }
@@ -151,10 +153,17 @@ final class Model: ObservableObject {
     DispatchQueue.global(qos: .userInitiated).async {
       let (_, out) = runTool(TIDY, ["--status"])
       let (_, so) = runTool(SCRAMBLE, ["status"])
-      var sc = false, scLeft = 0
+      var sc = false, scLeft = 0, mode = "scramble", target = 20, low = false, gb: Double? = nil
       if let line = so.split(separator: "\n").last(where: { $0.hasPrefix("{") }), let d = line.data(using: .utf8),
-         let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { sc = j["scramble"] as? Bool ?? false; scLeft = j["scramble_left_min"] as? Int ?? 0 }
-      if var s = parseStatus(out) { s.sc = sc; s.scLeft = scLeft; DispatchQueue.main.async { self.st = s } }
+         let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+        sc = j["scramble"] as? Bool ?? false; scLeft = j["scramble_left_min"] as? Int ?? 0
+        mode = j["mode"] as? String ?? "scramble"; target = j["target_agents"] as? Int ?? 20
+        low = j["disk_low"] as? Bool ?? false; gb = j["disk_free_gb"] as? Double
+      }
+      if var s = parseStatus(out) {
+        s.sc = sc; s.scLeft = scLeft; s.scMode = mode; s.scTarget = target; s.scDiskLow = low; s.scDiskGB = gb
+        DispatchQueue.main.async { self.st = s; if sc { self.scPick = mode; if mode == "custom" { self.customN = target } } }
+      }
     }
     refreshLanes()
   }
@@ -162,9 +171,21 @@ final class Model: ObservableObject {
     guard busy == nil else { return }
     switch a {
     case .afterburner: run(a, AFTERBURNER, st.ab ? ["off", "turned off in Hangar"] : ["on", "2h", "Hangar button"])
-    case .scramble: run(a, SCRAMBLE, st.sc ? ["off", "turned off in Hangar"] : ["on", "8h", "Hangar button"])
+    case .scramble: if st.sc { run(a, SCRAMBLE, ["off", "turned off in Hangar"]) } else { setScramble(scPick) }
     case .save: run(a, TIDY, a.tidyArgs)
     case .tidy, .backup, .all: preview(a)
+    }
+  }
+  /// Scramble mode picker: cap | scramble | surge | custom (uses customN). The CLI refuses counts above 20 under 10 GB free and says why.
+  func setScramble(_ mode: String) {
+    guard busy == nil else { return }
+    scPick = mode
+    let why = ["Hangar button"]
+    switch mode {
+    case "cap": run(.scramble, SCRAMBLE, ["cap", "8h"] + why)
+    case "surge": run(.scramble, SCRAMBLE, ["surge", "8h"] + why)
+    case "custom": run(.scramble, SCRAMBLE, ["set", "\(min(40, max(1, customN)))", "8h"] + why)
+    default: run(.scramble, SCRAMBLE, ["on", "8h"] + why)
     }
   }
   func preview(_ a: Act) {
@@ -324,6 +345,59 @@ struct Tile<Icon: View>: View {
   }
 }
 
+let AMBER = Color(red: 1.0, green: 0.72, blue: 0.0)
+func scLabel(_ mode: String, _ n: Int) -> String {
+  switch mode { case "cap": return "CAP · \(n)"; case "surge": return "Surge · \(n)"; case "custom": return "Custom · \(n)"; default: return "Scramble · \(n)" }
+}
+func scCount(_ mode: String, _ custom: Int) -> Int { switch mode { case "cap": return 12; case "surge": return 25; case "custom": return custom; default: return 20 } }
+/// Scramble tile (same footprint as the other tiles): tap = launch / land; the label is a menu: CAP 12, Scramble 20, Surge 25, Custom, Off.
+/// Custom shows a - / + stepper (1 to 40). Green glow when on; amber with "disk low" when free disk is under 10 GB.
+struct ScrambleTile: View {
+  @ObservedObject var m: Model
+  let enabled: Bool
+  var mode: String { m.st.sc ? m.st.scMode : m.scPick }
+  var n: Int { m.st.sc ? m.st.scTarget : scCount(m.scPick, m.customN) }
+  var low: Bool { m.st.scDiskLow }
+  var tint: Color { low ? AMBER : .green }
+  var glow: Bool { m.st.sc }
+  var sub: String {
+    if low { return "disk low · \(String(format: "%.1f", m.st.scDiskGB ?? 0)) GB free\n" + (m.st.sc ? "ON · \(hm(m.st.scLeft)) left" : "over 20 won't start") }
+    return m.st.sc ? "ON · \(hm(m.st.scLeft)) left\n\(n) agents · tap to land" : "off · tap for 8 h\n\(n) agents flying"
+  }
+  func pick(_ mode: String) { m.scPick = mode; m.setScramble(mode) }
+  var body: some View {
+    VStack(spacing: 5) {
+      ScrambleIcon(on: m.st.sc).frame(height: 46)
+      Menu {
+        Button("CAP · 12 agents") { pick("cap") }
+        Button("Scramble · 20 agents") { pick("scramble") }
+        Button("Surge · 25 agents") { pick("surge") }.disabled(low)
+        Button("Custom · \(m.customN) agents") { pick("custom") }.disabled(low && m.customN > 20)
+        Divider()
+        Button("Off") { if m.st.sc { m.tap(.scramble) } }.disabled(!m.st.sc)
+      } label: { Text(scLabel(mode, n) + " ▾").font(.system(size: 13, weight: .semibold)) }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().disabled(!enabled)
+      if mode == "custom" {
+        HStack(spacing: 6) {
+          Button("−") { m.customN = max(1, m.customN - 1) }.buttonStyle(.bordered).controlSize(.mini)
+          Text("\(m.customN)").font(.system(size: 11.5, weight: .semibold, design: .monospaced)).frame(minWidth: 22)
+          Button("+") { m.customN = min(40, m.customN + 1) }.buttonStyle(.bordered).controlSize(.mini)
+          if m.st.sc && m.st.scTarget != m.customN { Button("Set") { m.setScramble("custom") }.buttonStyle(.borderedProminent).controlSize(.mini) }
+        }.frame(minHeight: 26)
+      } else {
+        Text(sub).font(.system(size: 10.5)).foregroundStyle(low ? AMBER : .secondary).lineLimit(2).multilineTextAlignment(.center).frame(minHeight: 26, alignment: .top)
+      }
+    }
+    .frame(maxWidth: .infinity, minHeight: 112).padding(.horizontal, 6)
+    .background(RoundedRectangle(cornerRadius: 12).fill(tint.opacity(glow || low ? 0.22 : 0.10)))
+    .overlay(RoundedRectangle(cornerRadius: 12).stroke(tint.opacity(glow || low ? 0.7 : 0.28), lineWidth: glow ? 1.5 : 1))
+    .contentShape(RoundedRectangle(cornerRadius: 12))
+    .onTapGesture { if enabled { m.tap(.scramble) } }
+    .opacity(enabled ? 1 : 0.45)
+    .help("Tap to launch or land. Click the name to pick CAP 12, Scramble 20, Surge 25 or Custom 1-40. Surge and Custom above 20 need 10 GB free disk.")
+  }
+}
+
 func ago(_ t: Double?) -> String {
   guard let t = t else { return "never" }
   let d = Date().timeIntervalSince1970 - t
@@ -414,8 +488,7 @@ struct PanelView: View {
       HStack(spacing: 8) {
         Tile(title: "Afterburner", sub: m.st.ab ? "ON · \(hm(m.st.abLeft)) left\ntap to land" : "off · tap for 2 h\nmore power", tint: .orange,
              enabled: idle, glow: m.st.ab, action: { m.tap(.afterburner) }) { Jet(on: m.st.ab) }
-        Tile(title: "Scramble", sub: m.st.sc ? "ON · \(hm(m.st.scLeft)) left\n20 agents · tap to land" : "off · tap for 8 h\nall 20 agents flying", tint: .green,
-             enabled: idle, glow: m.st.sc, action: { m.tap(.scramble) }) { ScrambleIcon(on: m.st.sc) }
+        ScrambleTile(m: m, enabled: idle)
       }
       HStack(spacing: 8) {
         Tile(title: "Jettison", sub: "old build files\nto the Trash", tint: .brown, enabled: idle, glow: false, action: { m.tap(.tidy) }) { DropTank() }
@@ -546,7 +619,9 @@ enum Shots {
     let (_, plan) = runTool(TIDY, ["--dry-run", "--only", "clean"])
     conf.pending = Pending(act: .tidy, plan: plan.trimmingCharacters(in: .whitespacesAndNewlines), summary: summaryLine(plan))
     let ln = Model(); ln.st = live.st; ln.tab = 1; ln.lanes = readLanes()
-    let cases: [(String, Model)] = [("panel", live), ("afterburner_on", ab), ("confirm_tidy", conf), ("lanes", ln)]
+    let sc1 = Model(); sc1.st = live.st; sc1.st.sc = true; sc1.st.scLeft = 262; sc1.st.scMode = "surge"; sc1.st.scTarget = 25; sc1.st.scDiskLow = false
+    let sc2 = Model(); sc2.st = live.st; sc2.st.sc = false; sc2.scPick = "custom"; sc2.customN = 14; sc2.st.scDiskLow = true; sc2.st.scDiskGB = 4.2
+    let cases: [(String, Model)] = [("panel", live), ("afterburner_on", ab), ("confirm_tidy", conf), ("lanes", ln), ("scramble_surge_on", sc1), ("scramble_custom_disklow", sc2)]
     var jobs = [(Model, String, String)]()
     for (n, mdl) in cases { for ap in ["light", "dark"] { jobs.append((mdl, ap, "\(dir)/hangar_\(n)_\(ap).png")) } }
     func step(_ i: Int) {

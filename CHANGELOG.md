@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-04 (Scramble modes)
+- Scramble now has agent-count modes: `scramble cap` (CAP, 12), `scramble on` (Scramble, 20, unchanged), `scramble surge` (25) and `scramble set N` (Custom, 1 to 40), each with an optional `[duration] [reason]`. `scramble.json` gains `mode` next to `target_agents`; `status` prints `mode`, `disk_free_gb` and `disk_low` in its JSON line.
+- Disk safety: under 10 GB free, `status` warns; Surge and Custom above 20 refuse to turn on and print why. CAP, Scramble and Custom up to 20 still start, with the warning.
+- Hangar: the Scramble tile is now a mode picker (CAP 12 / Scramble 20 / Surge 25 / Custom with a stepper / Off) in the same tile footprint; green glow when on, the label shows the count, amber "disk low" under 10 GB. New screenshots.
+- Tests: `tests/test_scramble.py` (15, on a scratch state dir with a faked free-disk figure).
+
 ## 2026-11-03
 - Autosave: memguard can run your snapshot command every 5 minutes (MEMGUARD_AUTOSAVE_CMD, MEMGUARD_AUTOSAVE_SECS).
 - Scramble mode: `scramble on/off/status` (keep every agent slot filled from a queue file), Hangar Scramble tile, install links it.
