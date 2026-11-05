@@ -98,6 +98,61 @@ class AgentQ(unittest.TestCase):
         self.assertIn("backfilled 0 agents", self.run_aq("backfill", sub)[1])   # idempotent
         self.assertEqual(self.state()["finished_today"], 1)
 
+    # departments (Nov 5, 2026)
+    def start(self, aid, desc, **kw):
+        self.hook(dict({"hook_event_name": "PostToolUse", "tool_name": "Agent", "tool_use_id": "t_" + aid, "tool_input": {"description": desc},
+                        "tool_response": "Async agent launched. agentId: " + aid}, **kw))
+    def test_dept_prefix_parsed_and_stripped(self):
+        self.start("qa000001", "[dept:QA] Run the scenario suite")
+        s = self.state(); self.assertEqual(s["by_dept"], {"QA": 1})
+        md = self.md(); self.assertIn("| R1 | Run the scenario suite |", md); self.assertIn("| QA |", md); self.assertNotIn("[dept:", md)
+        self.assertIn("## Departments", md)
+    def test_dept_from_subagent_meta(self):
+        sub = os.path.join(self.d, "s2", "subagents"); os.makedirs(sub)
+        with open(os.path.join(sub, "agent-sec00001.meta.json"), "w") as fh: json.dump({"description": "[ Dept : Security ] Review keys"}, fh)
+        tp = os.path.join(sub, "agent-sec00001.jsonl"); open(tp, "w").close()
+        self.hook({"hook_event_name": "SubagentStart", "agent_id": "sec00001", "transcript_path": tp})
+        self.assertEqual(self.state()["by_dept"], {"Security": 1})
+        self.assertIn("| R1 | Review keys |", self.md())
+    def test_dept_from_env(self):
+        self.env["AGENTQ_DEPT"] = "Platform"
+        self.start("plat0001", "Build the app")
+        self.start("plat0002", "[dept:Growth] Draft a post")    # the prefix wins over the env
+        self.assertEqual(self.state()["by_dept"], {"Platform": 1, "Growth": 1})
+    def test_untagged_looks_as_before(self):
+        self.start("plain001", "Plain job")
+        s = self.state(); self.assertEqual((s["by_dept"], s["needs_supervisor"]), ({"Unassigned": 1}, []))
+        self.assertNotIn("## Departments", self.md())
+        out = self.run_aq("list")[1]; self.assertIn("  R1  Plain job", out); self.assertNotIn("Unassigned", out)
+    def test_needs_supervisor_over_ten(self):
+        for i in range(11): self.start("radio%03d" % i, "[dept:Radio] job %d" % i)
+        for i in range(10): self.start("qa%06d" % i, "[dept:QA] job %d" % i)
+        s = self.state(); self.assertEqual(s["needs_supervisor"], ["Radio"])   # 11 > 10; 10 is not over
+        self.assertIn("needs supervisor: Radio", self.run_aq("status")[1])
+        d = self.run_aq("depts")[1]; self.assertRegex(d, r"Radio\s+11 running  NEEDS SUPERVISOR"); self.assertNotRegex(d, r"QA.*NEEDS")
+        self.assertIn("| Radio | 11 | needs supervisor (over 10) |", self.md())
+        self.hook({"hook_event_name": "SubagentStop", "agent_id": "radio000"})   # back to 10: flag clears
+        self.assertEqual(self.state()["needs_supervisor"], [])
+    def test_list_groups_and_filters(self):
+        self.start("aa000001", "[dept:QA] one"); self.start("bb000001", "[dept:Research] two"); self.start("cc000001", "[dept:QA] three")
+        self.run_aq("add", "later")
+        out = self.run_aq("list")[1]
+        self.assertLess(out.index("QA (2 running)"), out.index("Research (1 running)"))
+        self.assertIn("Q1  later", out)
+        f = self.run_aq("list", "research")[1]; self.assertIn("two", f); self.assertNotIn("one", f); self.assertNotIn("later", f)
+        self.assertIn("no running agents in Growth", self.run_aq("list", "Growth")[1])
+    def test_odd_dept_names_cleaned(self):
+        self.start("odd00001", "[dept:  Q|A `x`  ] job")
+        self.assertEqual(list(self.state()["by_dept"]), ["QA x"])
+    def test_tag_running_agent(self):
+        self.start("tg000001", "Head of QA"); self.start("tg000002", "[dept:Research] sweep")
+        out = self.run_aq("list")[1]; self.assertIn("R1  sweep", out); self.assertIn("R2  Head of QA", out)   # Research first, Unassigned last
+        rc, msg = self.run_aq("tag", "R2", "QA"); self.assertEqual(rc, 0); self.assertIn("QA", msg)
+        self.assertEqual(self.state()["by_dept"], {"QA": 1, "Research": 1})
+        self.run_aq("tag", "tg000002", "Growth")                      # by agent id; a later tag wins
+        self.assertEqual(self.state()["by_dept"], {"QA": 1, "Growth": 1})
+        self.assertEqual(self.run_aq("tag", "R9", "QA")[0], 1)
+        self.assertEqual(self.run_aq("tag", "R1")[0], 2)
 
 if __name__ == "__main__":
     unittest.main()

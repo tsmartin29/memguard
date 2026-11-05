@@ -9,7 +9,9 @@ write every agent start and finish to an append-only log, and the markdown view 
   agentq add "<task>"               add a PENDING item (the backlog); prints its id (Q1, Q2, ...)
   agentq done <id> [note]           mark a PENDING item done (Q3 or 3)
   agentq status                     running / finished today / pending counts, newest entry age, STALE flag
-  agentq list                       status plus the running agents and the pending items
+  agentq list [dept]                status plus the running agents (grouped by department) and the pending items; a dept name filters
+  agentq depts                      running agents per department; "needs supervisor" when one has more than 10
+  agentq tag <R#|agent id> <dept>   put an agent that is already running into a department (R# as numbered by `list`)
   agentq render [YYYY-MM-DD]        regenerate the dated markdown view (default today)
   agentq backfill <subagents_dir> [YYYY-MM-DD]
                                     reconstruct agents from Claude Code subagent transcripts (agent-*.meta.json + .jsonl) for one day
@@ -21,6 +23,11 @@ Files (AGENTQ_DIR, default ~/.config/memguard/queue):
   AGENT_QUEUE_<date>.md   generated view, written to AGENTQ_MD_DIR (default AGENTQ_DIR). Do not edit it: use add / done.
 Settings: AGENTQ_STALE_HOURS (2), AGENTQ_BUSINESS_HOURS ("8-18", local clock; STALE is only raised inside these hours),
 AGENTQ_LOST_HOURS (12: an agent with no finish after this long counts as lost, not running).
+
+Departments (optional, Nov 5, 2026: agents are grouped by function under a department head): an agent's department comes from a
+"[dept:Name]" prefix on its description (stripped from the shown text), else from AGENTQ_DEPT in the hook's environment (set it when
+you start a head's session and every agent that session spawns is tagged). Agents with neither are "Unassigned". A department with
+more than AGENTQ_SUPERVISOR_OVER (10) running agents is flagged "needs supervisor": its head may spawn a supervisor agent.
 """
 import calendar, fcntl, glob, json, os, re, sys, time
 
@@ -38,6 +45,22 @@ def fenv(name, dflt):
 
 STALE_H = fenv("AGENTQ_STALE_HOURS", 2)
 LOST_H = fenv("AGENTQ_LOST_HOURS", 12)
+SUP_OVER = int(fenv("AGENTQ_SUPERVISOR_OVER", 10))
+NO_DEPT = "Unassigned"
+DEPT_RE = re.compile(r"^\s*\[\s*dept\s*:\s*([^\]\n]{1,60})\]\s*", re.I)
+
+def clean_dept(name):
+    name = re.sub(r"\s+", " ", re.sub(r"[^\w &/+.-]", "", str(name or ""))).strip()
+    return name[:40]
+
+def split_dept(text):
+    """'[dept:QA] Run the suite' -> ('QA', 'Run the suite'); no prefix -> ('', text)."""
+    text = str(text or "")
+    m = DEPT_RE.match(text)
+    if not m: return "", text
+    return clean_dept(m.group(1)), text[m.end():]
+
+def env_dept(): return clean_dept(os.environ.get("AGENTQ_DEPT", ""))
 
 def business_hours():
     m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", os.environ.get("AGENTQ_BUSINESS_HOURS", "8-18"))
@@ -106,8 +129,9 @@ def fold(events, now=None):
             if not k: continue
             k = alias.get(k, k)
             a = agents.setdefault(k, {"id": k, "start": None, "end": None, "last_start": 0.0, "last_end": 0.0})
-            for f in ("desc", "model", "type", "prompt", "session", "proj", "src"):
+            for f in ("desc", "model", "type", "prompt", "session", "proj", "src", "dept"):
                 if e.get(f) and not a.get(f): a[f] = e[f]
+            if e.get("retag") and e.get("dept"): a["dept"] = e["dept"]   # `agentq tag` overrides the first tag
             if ev in ("start", "info"):
                 a["start"] = ts if a["start"] is None else min(a["start"], ts)
                 if ev == "start" and e.get("via") != "post": a["last_start"] = max(a["last_start"], ts)   # PostToolUse can arrive after the finish
@@ -137,12 +161,15 @@ def summary(now=None):
     fin = [a for a in agents if a["status"] == "finished" and day(a["end"]) == today]
     lost = [a for a in agents if a["status"] == "lost" and day(a["start"]) == today]
     openp = [p for p in pend if not p["done"]]
+    by_dept = {}
+    for a in run: by_dept[a.get("dept") or NO_DEPT] = by_dept.get(a.get("dept") or NO_DEPT, 0) + 1
     lo, hi = business_hours()
     hour = time.localtime(now).tm_hour
     age = now - newest if newest else None
     stale = (age is None or age > STALE_H * 3600) and lo <= hour < hi
     return {"running": len(run), "finished_today": len(fin), "lost_today": len(lost), "pending": len(openp),
             "newest": newest or None, "age_min": None if age is None else int(age // 60), "stale": stale,
+            "by_dept": by_dept, "needs_supervisor": sorted(d for d, n in by_dept.items() if n > SUP_OVER and d != NO_DEPT),
             "_run": run, "_fin": fin, "_lost": lost, "_pend": openp, "_agents": agents, "_allpend": pend}
 
 
@@ -166,16 +193,21 @@ def render(date=None):
          " Source of truth: `queue/agents.jsonl`. Times are local.", "",
          "Newest entry: %s%s" % (hm(s["newest"]) if s["newest"] else "none",
                                  " (STALE: nothing for %d min)" % s["age_min"] if s["stale"] and s["age_min"] is not None else ""), "",
-         "## Running (%d)" % len(run), "", "| # | Job | Started | Model | Agent |", "|---|---|---|---|---|"]
+         "## Running (%d)" % len(run), "", "| # | Job | Started | Model | Agent | Dept |", "|---|---|---|---|---|---|"]
     for i, a in enumerate(run, 1):
-        L.append("| R%d | %s | %s | %s | %s |" % (i, cell(a.get("desc") or a.get("prompt") or a["id"]), hm(a["start"]), cell(a.get("model", "")), cell(a.get("type", ""))))
+        L.append("| R%d | %s | %s | %s | %s | %s |" % (i, cell(a.get("desc") or a.get("prompt") or a["id"]), hm(a["start"]), cell(a.get("model", "")),
+                                                    cell(a.get("type", "")), cell(a.get("dept", ""))))
+    if any(a.get("dept") for a in run):   # only once departments are in use, so untagged setups look as before
+        L += ["", "## Departments (running agents)", "", "| Dept | Running | Note |", "|---|---|---|"]
+        for d, n in sorted(s["by_dept"].items(), key=lambda kv: (kv[0] == NO_DEPT, -kv[1], kv[0])):
+            L.append("| %s | %d | %s |" % (cell(d), n, "needs supervisor (over %d)" % SUP_OVER if d in s["needs_supervisor"] else ""))
     L += ["", "## PENDING (queued, top first) (%d)" % len(s["_pend"]), "", "| # | Task | Added |", "|---|---|---|"]
     for p in s["_pend"]:
         L.append("| %s | %s | %s |" % (p["pid"], cell(p["text"]), time.strftime("%b %-d %-I:%M %p", time.localtime(p["added"]))))
-    L += ["", "## Finished (%d)" % len(fin), "", "| # | Job | Started | Finished | Model | Result |", "|---|---|---|---|---|---|"]
+    L += ["", "## Finished (%d)" % len(fin), "", "| # | Job | Started | Finished | Model | Result | Dept |", "|---|---|---|---|---|---|---|"]
     for i, a in enumerate(fin, 1):
-        L.append("| F%d | %s | %s | %s | %s | %s |" % (i, cell(a.get("desc") or a.get("prompt") or a["id"]), hm(a["start"]), hm(a["end"]),
-                                                    cell(a.get("model", "")), cell(a.get("result", ""))))
+        L.append("| F%d | %s | %s | %s | %s | %s | %s |" % (i, cell(a.get("desc") or a.get("prompt") or a["id"]), hm(a["start"]), hm(a["end"]),
+                                                         cell(a.get("model", "")), cell(a.get("result", "")), cell(a.get("dept", ""))))
     if lost:
         L += ["", "## Lost (no finish after %g h) (%d)" % (LOST_H, len(lost)), ""] + ["- %s (started %s)" % (cell(a.get("desc") or a["id"]), hm(a["start"])) for a in lost]
     if done_today:
@@ -226,7 +258,9 @@ def hook_events(p):
         resp = json.dumps(p.get("tool_response"), ensure_ascii=False) if p.get("tool_response") is not None else ""
         m = re.search(r'agent_?[iI]d\\?"?\s*[:=]\s*\\?"?([A-Za-z0-9_-]{6,})', resp)
         tuid = p.get("tool_use_id") or ""
-        e = dict(base, ev="start", via="post", id=m.group(1) if m else tuid, tuid=tuid, desc=one_line(ti.get("description"), 120),
+        dept, desc = split_dept(ti.get("description"))
+        if not dept: dept = split_dept(ti.get("prompt"))[0] or env_dept()
+        e = dict(base, ev="start", via="post", id=m.group(1) if m else tuid, tuid=tuid, desc=one_line(desc, 120), dept=dept,
                  model=ti.get("model") or "", type=ti.get("subagent_type") or "general-purpose", prompt=one_line(ti.get("prompt"), 160),
                  bg=bool(ti.get("run_in_background", True)))
         e = {k: v for k, v in e.items() if v not in ("", None)}
@@ -238,15 +272,17 @@ def hook_events(p):
         aid = p.get("agent_id") or ""
         if not aid: return []
         md = meta_for(p.get("transcript_path"), sid, aid)
+        dept, desc = split_dept(md.get("description"))
         e = dict(base, ev="start", id=aid, tuid=md.get("toolUseId", ""), type=p.get("agent_type") or md.get("agentType", ""),
-                 desc=one_line(md.get("description"), 120), model=md.get("model", ""))
+                 desc=one_line(desc, 120), model=md.get("model", ""), dept=dept or env_dept())
         return [{k: v for k, v in e.items() if v not in ("", None)}]
     if ev == "SubagentStop":
         aid = p.get("agent_id") or ""
         if not aid: return []
         md = meta_for(p.get("agent_transcript_path") or p.get("transcript_path"), sid, aid)
+        dept, desc = split_dept(md.get("description"))
         e = dict(base, ev="finish", id=aid, tuid=md.get("toolUseId", ""), type=p.get("agent_type") or md.get("agentType", ""),
-                 desc=one_line(md.get("description"), 120), model=md.get("model", ""), result=one_line(p.get("last_assistant_message"), 160))
+                 desc=one_line(desc, 120), dept=dept or env_dept(), model=md.get("model", ""), result=one_line(p.get("last_assistant_message"), 160))
         return [{k: v for k, v in e.items() if v not in ("", None)}]
     return []
 
@@ -301,7 +337,8 @@ def backfill(sub_dir, date=None):
                 if x.get("type") == "text": result = x.get("text", "")
                 if x.get("name") == "SubagentHandback": result = (x.get("input") or {}).get("message", "")
         done = handback or msg.get("stop_reason") == "end_turn" or now - os.path.getmtime(tp) > 15 * 60
-        base = {"id": aid, "tuid": md.get("toolUseId", ""), "desc": one_line(md.get("description"), 120), "model": md.get("model", ""),
+        dept, desc = split_dept(md.get("description"))
+        base = {"id": aid, "tuid": md.get("toolUseId", ""), "desc": one_line(desc, 120), "dept": dept, "model": md.get("model", ""),
                 "type": md.get("agentType", ""), "prompt": one_line(prompt, 160), "src": "backfill"}
         base = {k: v for k, v in base.items() if v}
         new.append(dict(base, ev="start", ts=t0))
@@ -320,7 +357,34 @@ def status_line(s):
     age = "no entries yet" if s["age_min"] is None else ("newest entry %d min ago" % s["age_min"])
     return "%d running, %d finished today, %d pending; %s%s%s" % (
         s["running"], s["finished_today"], s["pending"], age, "; %d lost" % s["lost_today"] if s["lost_today"] else "",
-        "; STALE (nothing for over %g h in business hours)" % STALE_H if s["stale"] else "")
+        "; STALE (nothing for over %g h in business hours)" % STALE_H if s["stale"] else "") + \
+        ("; needs supervisor: %s" % ", ".join(s["needs_supervisor"]) if s["needs_supervisor"] else "")
+
+def dept_lines(s):
+    rows = sorted(s["by_dept"].items(), key=lambda kv: (kv[0] == NO_DEPT, -kv[1], kv[0]))
+    return ["  %-24s %3d running%s" % (d, n, "  NEEDS SUPERVISOR (over %d)" % SUP_OVER if d in s["needs_supervisor"] else "") for d, n in rows]
+
+def sorted_groups(s):
+    """[(dept, [running agents])], biggest department first, Unassigned last."""
+    groups = {}
+    for a in s["_run"]: groups.setdefault(a.get("dept") or NO_DEPT, []).append(a)
+    return sorted(groups.items(), key=lambda kv: (kv[0] == NO_DEPT, -len(kv[1]), kv[0]))
+
+def list_lines(s, only=""):
+    """Running agents grouped by department (only = one department, case-insensitive), then the pending items."""
+    out, groups = [], sorted_groups(s)
+    flat = [d for d, _ in groups] == [NO_DEPT] and not only   # nobody tagged: the plain list, as before
+    n = 0
+    for d, members in groups:
+        if only and d.lower() != only.strip().lower(): n += len(members); continue
+        if not flat:
+            out.append("  %s (%d running)%s" % (d, len(members), "  NEEDS SUPERVISOR" if d in s["needs_supervisor"] else ""))
+        for a in members:
+            n += 1; out.append("%sR%d  %s  (%s, %s)" % ("    " if not flat else "  ", n, a.get("desc") or a["id"], hm(a["start"]), a.get("model", "")))
+    if only and not out: out.append("  no running agents in %s" % only.strip())
+    if not only:
+        for p in s["_pend"]: out.append("  %s  %s" % (p["pid"], p["text"]))
+    return out
 
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "status"
@@ -351,12 +415,23 @@ def main(argv):
         print("backfilled %d agents (%d finished)" % (s, f)); return 0
     if cmd in ("status", "list"):
         s = summary(); print(status_line(s))
-        if cmd == "list":
-            for i, a in enumerate(s["_run"], 1): print("  R%d  %s  (%s, %s)" % (i, a.get("desc") or a["id"], hm(a["start"]), a.get("model", "")))
-            for p in s["_pend"]: print("  %s  %s" % (p["pid"], p["text"]))
+        if cmd == "list": print("\n".join(list_lines(s, " ".join(argv[2:]))))
         return 0
+    if cmd == "tag":
+        if len(argv) < 4: print("usage: queue tag <R#|agent id> <dept>"); return 2
+        dept = clean_dept(" ".join(argv[3:]))
+        if not dept: print("no usable department name"); return 2
+        s = summary(); ref = argv[2]
+        order = [a for d in sorted_groups(s) for a in d[1]]   # the same R numbering `list` prints
+        hit = order[int(ref[1:]) - 1] if re.fullmatch(r"[Rr]\d+", ref) and 0 < int(ref[1:]) <= len(order) else \
+              next((a for a in s["_agents"] if a["id"] == ref), None)
+        if not hit: print("no agent %s" % ref); return 1
+        append([{"ev": "info", "id": hit["id"], "dept": dept, "retag": True}])
+        print("%s -> %s: %s" % (ref, dept, hit.get("desc") or hit["id"])); return 0
+    if cmd == "depts":
+        s = summary(); print("\n".join(dept_lines(s)) or "no running agents"); return 0
     if cmd == "json":
-        s = summary(); print(json.dumps({k: v for k, v in s.items() if not k.startswith("_")})); return 0
+        s = summary(); print(json.dumps({k: v for k, v in s.items() if not k.startswith("_")}, sort_keys=True)); return 0
     print(__doc__); return 2
 
 if __name__ == "__main__":
