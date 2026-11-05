@@ -45,3 +45,7 @@ Numbers assume a 24 GB Mac; scale them to yours and match them to `config.json`.
     regenerable build output under the configured roots to one dated Trash folder (never `rm`), skips any tree edited in the last 30
     minutes, any tree a process has open and any tree a queued or running `heavyrun` job names, so put the path of the tree you work in into
     your job label. Never move or delete build output yourself in a tree another session is using; run `tidy --dry-run` and ask.
+15. Departments (optional). If your agents work under department heads, start every agent's description with `[dept:<Name>]`
+    (for example `[dept:QA] Run the scenario suite`), or start a head's session with `AGENTQ_DEPT=<Name>` so everything it spawns is
+    tagged. `queue list <dept>` shows one department and `queue depts` the counts. When a department has more than 10 running agents
+    it shows NEEDS SUPERVISOR: only then may its head spawn a supervisor agent to help review and coordinate.
