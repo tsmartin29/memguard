@@ -33,4 +33,4 @@ if [ "${1:-}" = "--no-install" ]; then echo "built $APP"; exit 0; fi
 mkdir -p "$HOME/Applications"
 if [ -e "$DEST" ]; then pkill -x Hangar 2>/dev/null || true; mv "$DEST" "$HOME/.Trash/Hangar.app.$(date +%Y%m%d-%H%M%S)"; fi
 mv "$APP" "$DEST"
-echo "installed $DEST (open it: a plane appears in the menu bar)"
+echo "installed $DEST (open it: a car appears in the menu bar)"
