@@ -1,0 +1,6 @@
+#!/bin/bash
+# queue add "<task>" | done <id> | status | list | render | backfill <dir> | hook   (see agentq.py)
+# Claude Code hooks call `agentq hook`; it never blocks a tool call. Data: $AGENTQ_DIR/agents.jsonl (default ~/.config/memguard/queue).
+export AGENTQ_DIR="${AGENTQ_DIR:-$HOME/.config/memguard/queue}"
+export AGENTQ_MD_DIR="${AGENTQ_MD_DIR:-$AGENTQ_DIR}"
+exec /usr/bin/python3 -I "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/agentq.py" "$@"
