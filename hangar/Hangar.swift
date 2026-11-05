@@ -119,12 +119,26 @@ var QUEUE_ON: Bool { QUEUE_PATTERN != nil || FileManager.default.fileExists(atPa
 let QUEUE_STALE_SECS = (Double(ENV["HANGAR_QUEUE_STALE_HOURS"] ?? "") ?? 2) * 3600
 let QUEUE_LOST_SECS = 12 * 3600.0
 let QUEUE_MIN_REREAD = 60.0
+// Departments (Nov 5, 2026): agentq tags each agent with a department ("[dept:Name]" description prefix or AGENTQ_DEPT). The Queue tab
+// groups running agents by department and marks one with more than HANGAR_SUPERVISOR_OVER (10) as "needs supervisor".
+let SUPERVISOR_OVER = Int(ENV["HANGAR_SUPERVISOR_OVER"] ?? "") ?? 10
+let NO_DEPT = "Unassigned"
+func splitDept(_ s: String) -> (String, String) {
+  let t = s.trimmingCharacters(in: .whitespaces)
+  guard t.lowercased().hasPrefix("[dept:"), let close = t.firstIndex(of: "]") else { return ("", s) }
+  let name = t[t.index(t.startIndex, offsetBy: 6)..<close].trimmingCharacters(in: .whitespaces)
+  return (name, String(t[t.index(after: close)...]).trimmingCharacters(in: .whitespaces))
+}
+struct DeptCount: Identifiable { var id: String { name }; let name: String; let running: Int; var needsSupervisor: Bool { name != NO_DEPT && running > SUPERVISOR_OVER } }
 let BUSINESS_HOURS: (Int, Int) = {
   let parts = (ENV["HANGAR_BUSINESS_HOURS"] ?? "8-18").split(separator: "-").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
   return parts.count == 2 ? (parts[0], parts[1]) : (8, 18)
 }()
 struct QItem: Identifiable { let id: String; let text: String }
-struct QueueInfo { var found = false, name = "", running = 0, finished = 0, queued = 0, top = [QItem](), mtime: Date? = nil, runningTop = [QItem]() }
+struct QueueInfo {
+  var found = false, name = "", running = 0, finished = 0, queued = 0, top = [QItem](), mtime: Date? = nil, runningTop = [QItem](), depts = [DeptCount]()
+  var tagged: Bool { depts.contains { $0.name != NO_DEPT } }   // the department block shows only once agents carry a department
+}
 func queueStale(_ q: QueueInfo, now: Date = Date()) -> Bool {
   guard q.found else { return false }
   let h = Calendar.current.component(.hour, from: now)
@@ -170,7 +184,7 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
   }
   var alias = [String: String]()
   for e in evs { if let i = e["id"] as? String, let t = e["tuid"] as? String, !t.isEmpty, i != t { alias[t] = i } }
-  struct A { var start = Double.infinity, lastStart = 0.0, lastEnd = 0.0, desc = "" }
+  struct A { var start = Double.infinity, lastStart = 0.0, lastEnd = 0.0, desc = "", dept = "" }
   var agents = [String: A](), order = [String](), pend = [(String, String)](), done = Set<String>(), newest = 0.0
   for e in evs {
     let ts = (e["ts"] as? Double) ?? 0; newest = max(newest, ts)
@@ -180,7 +194,8 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
       k = alias[k] ?? k
       if agents[k] == nil { agents[k] = A(); order.append(k) }
       var a = agents[k]!
-      if a.desc.isEmpty, let d = (e["desc"] as? String) ?? (e["prompt"] as? String) { a.desc = d }
+      if a.desc.isEmpty, let d = (e["desc"] as? String) ?? (e["prompt"] as? String) { let (pd, rest) = splitDept(d); a.desc = rest; if a.dept.isEmpty { a.dept = pd } }
+      if let d = e["dept"] as? String, !d.isEmpty, a.dept.isEmpty || (e["retag"] as? Bool ?? false) { a.dept = d }
       if (e["ev"] as? String) == "finish" { a.lastEnd = max(a.lastEnd, ts); if a.start == .infinity { a.start = ts } }
       else { a.start = min(a.start, ts); if (e["ev"] as? String) == "start" && e["via"] == nil { a.lastStart = max(a.lastStart, ts) } }   // a PostToolUse row (via: post) can land after the finish
       agents[k] = a
@@ -191,16 +206,20 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
   }
   let cal = Calendar.current, t = now.timeIntervalSince1970
   var q = QueueInfo(); q.found = true
+  var perDept = [String: Int]()
   for k in order {
     let a = agents[k]!
     if a.lastEnd > 0 && a.lastEnd >= a.lastStart {
       if cal.isDate(Date(timeIntervalSince1970: a.lastEnd), inSameDayAs: now) { q.finished += 1 }
     } else if t - a.start <= QUEUE_LOST_SECS {
       q.running += 1; q.runningTop.append(QItem(id: "R\(q.running)", text: a.desc.isEmpty ? k : a.desc))
+      perDept[a.dept.isEmpty ? NO_DEPT : a.dept, default: 0] += 1
     }
   }
   let open = pend.filter { !done.contains($0.0) }.map { QItem(id: $0.0, text: $0.1) }
   q.queued = open.count; q.top = Array(open.prefix(3))
+  q.depts = perDept.map { DeptCount(name: $0.key, running: $0.value) }
+    .sorted { ($0.name == NO_DEPT ? 1 : 0, -$0.running, $0.name) < ($1.name == NO_DEPT ? 1 : 0, -$1.running, $1.name) }
   q.mtime = newest > 0 ? Date(timeIntervalSince1970: newest) : nil
   return q
 }
@@ -972,6 +991,25 @@ struct PanelView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(AMBER.opacity(0.7)))
       }
       HStack(spacing: 8) { count(q.running, "running", .green); count(q.finished, "finished today", .secondary); count(q.queued, "pending", .blue) }
+      if q.tagged {
+        VStack(alignment: .leading, spacing: 4) {
+          Text("Departments").font(.system(size: 11.5, weight: .semibold))
+          ForEach(q.depts) { d in
+            HStack(spacing: 6) {
+              Text(d.name).font(.system(size: 11)).foregroundStyle(d.name == NO_DEPT ? Color.secondary : Color.primary).lineLimit(1)
+              Spacer(minLength: 4)
+              if d.needsSupervisor {
+                Label("needs supervisor", systemImage: "person.badge.plus").font(.system(size: 10, weight: .semibold)).foregroundStyle(AMBER)
+              }
+              Text("\(d.running)").font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit()
+                .foregroundStyle(d.needsSupervisor ? AMBER : Color.green).frame(minWidth: 22, alignment: .trailing)
+            }
+          }
+        }
+        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.05)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.2)))
+      }
       VStack(alignment: .leading, spacing: 5) {
         Text(q.top.isEmpty ? (q.found ? "Nothing pending" : "No queue found") : "Next up").font(.system(size: 11.5, weight: .semibold))
         ForEach(q.top) { it in
@@ -1219,7 +1257,9 @@ if let f = ENV["HANGAR_QUEUE_PARSE"] {
   if f.hasSuffix(".jsonl") {
     let q = foldQueueLog(text, now: now)
     j = ["running": q.running, "finished": q.finished, "queued": q.queued, "ids": q.top.map { $0.id }, "top": q.top.map { $0.text },
-         "newest": q.mtime?.timeIntervalSince1970 ?? 0, "stale": queueStale(q, now: now)]
+         "newest": q.mtime?.timeIntervalSince1970 ?? 0, "stale": queueStale(q, now: now),
+         "depts": Dictionary(uniqueKeysWithValues: q.depts.map { ($0.name, $0.running) }), "needs_supervisor": q.depts.filter { $0.needsSupervisor }.map { $0.name },
+         "running_top": q.runningTop.map { $0.text }]
   } else {
     let r = parseQueue(text)
     j = ["running": r.running, "finished": r.finished, "queued": r.queued.count, "ids": r.queued.map { $0.id }, "top": r.queued.prefix(3).map { $0.text }]

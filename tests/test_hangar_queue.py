@@ -75,6 +75,28 @@ class QueueParser(unittest.TestCase):
     def test_markdown_pending_and_finished_sections(self):   # the view agentq writes
         r = self.parse("## Running (1)\n| R1 | a |\n## PENDING (queued, top first) (2)\n| Q1 | x |\n| Q2 | y |\n## Finished (3)\n| F1 | a |\n| F2 | b |\n| F3 | c |\n## PENDING done today (1)\n| Q0 | z |\n")
         self.assertEqual((r["running"], r["queued"], r["finished"]), (1, 2, 3))
+    # departments (Nov 5, 2026)
+    def test_jsonl_departments_and_supervisor_flag(self):
+        t = 1_800_000_000.0
+        ev = [{"ev": "start", "id": "p%d" % i, "dept": "Platform", "ts": t - 600 + i} for i in range(11)]
+        ev += [{"ev": "start", "id": "q%d" % i, "dept": "QA", "ts": t - 500 + i} for i in range(10)]
+        ev += [{"ev": "start", "id": "s1", "desc": "[dept:Security] review keys", "ts": t - 400},   # prefix only (older log rows)
+               {"ev": "start", "id": "u1", "desc": "untagged", "ts": t - 300},
+               {"ev": "finish", "id": "p0", "ts": t - 10}]                                             # Platform back to 10
+        r = self.log(ev, now=t)
+        self.assertEqual(r["depts"], {"Platform": 10, "QA": 10, "Security": 1, "Unassigned": 1})
+        self.assertEqual(r["needs_supervisor"], [])
+        self.assertIn("review keys", r["running_top"])
+        r = self.log(ev[:-1], now=t)
+        self.assertEqual((r["depts"]["Platform"], r["needs_supervisor"]), (11, ["Platform"]))
+    def test_jsonl_retag_wins(self):
+        t = 1_800_000_000.0
+        r = self.log([{"ev": "start", "id": "a1", "dept": "QA", "ts": t - 100},
+                      {"ev": "info", "id": "a1", "dept": "Growth", "retag": True, "ts": t - 50}], now=t)
+        self.assertEqual(r["depts"], {"Growth": 1})
+    def test_jsonl_untagged_has_only_unassigned(self):
+        r = self.log([{"ev": "start", "id": "a1", "ts": 1_799_999_990.0}], now=1_800_000_000.0)
+        self.assertEqual((r["depts"], r["needs_supervisor"]), ({"Unassigned": 1}, []))
 
 if __name__ == "__main__":
     unittest.main()
