@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-05 (departments)
+- **Departments (roles)** in agentq: an agent's department comes from a `[dept:<Name>]` prefix on its description (stripped from the shown text) or from `AGENTQ_DEPT` in the hook's environment; `queue tag <R#|id> <dept>` tags one already running. `queue list` groups running agents by department, `queue list <dept>` filters, `queue depts` counts. A department with more than 10 running agents (`AGENTQ_SUPERVISOR_OVER`) is flagged **needs supervisor** in `queue status`, `queue depts`, `queue json` (`by_dept`, `needs_supervisor`) and the markdown view (Dept column, Departments table). Untagged setups look as before.
+- Hangar Queue tab: a Departments block (running agents per department, amber "needs supervisor" over `HANGAR_SUPERVISOR_OVER`), shown once any agent carries a department. `HANGAR_QUEUE_PARSE` adds `depts`, `needs_supervisor` and `running_top`. New screenshots `hangar_queue_depts_*.png`.
+- RULES.md rule 15: how agents are tagged and when a head may spawn a supervisor. The org model behind it lives in [agent-governance](https://github.com/tsmartin29/agent-governance).
+- Tests: 8 new in `tests/test_agentq.py`, 3 new in `tests/test_hangar_queue.py`.
+
 ## 2026-11-05 (queue tracking via hooks, racing names, no screen animations)
 - New **agentq** (`agentq.py`, `agentq`, linked as `agentq` and `queue`): Claude Code hooks (`SubagentStart`, `SubagentStop`, `PostToolUse` on `Agent`/`Task`) append every agent start and finish to `queue/agents.jsonl` and regenerate a dated `AGENT_QUEUE_<date>.md` view; `queue add` / `queue done` keep a PENDING backlog; `queue backfill` rebuilds a day from subagent transcripts. The hook fails open (always exits 0, errors to `hook_errors.log`). README: "Queue tracking via hooks". Tests: `tests/test_agentq.py`.
 - Hangar Queue tab reads the agentq log first (`HANGAR_QUEUE_JSONL`), shows running / finished today / pending, and a **STALE** banner when the newest entry is older than 2 h in business hours (`HANGAR_QUEUE_STALE_HOURS`, `HANGAR_BUSINESS_HOURS`). The markdown fallback now also reads `## PENDING` and `## Finished` sections.

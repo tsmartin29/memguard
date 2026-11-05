@@ -17,7 +17,7 @@ Run 20-30 Claude Code sessions on a 24 GB laptop and sooner or later two of them
 | `afterburner.py`, `afterburner` | Afterburner (DRS in Hangar; `drs` is an alias): `afterburner on 2h` raises the queue caps for a while (more heavy jobs as memory allows, a second light slot, `nice -n 10`) and drops back to normal by itself. |
 | `tidy.py`, `tidy` | One step to clean build output to the Trash, push unpushed branches and back up to an attached drive. `tidy --dry-run` shows the plan. |
 | `hangar/` | Hangar, an optional SwiftUI menu-bar app with buttons for DRS (afterburner), the agent modes, tidy, save and backup (`Hangar.swift`, `build.sh`, `shots/`). |
-| `agentq.py`, `agentq` | Queue tracking via Claude Code hooks: every agent start and finish logged to `agents.jsonl`, a dated markdown view, and a PENDING backlog (`queue add` / `queue done`). |
+| `agentq.py`, `agentq` | Queue tracking via Claude Code hooks: every agent start and finish logged to `agents.jsonl`, a dated markdown view, and a PENDING backlog (`queue add` / `queue done`). Optional department tags: `queue list` and Hangar group agents by department and flag one that needs a supervisor. |
 | `usagegate.py` | The usage-limit prompt (Claude Code plans): asks what to do when weekly usage gets high, and holds the queue if you say so. Called by `memguard.py` every pass and by `heavyrun`. |
 | `usage_statusline.py` | Claude Code `statusLine` hook that feeds `usage.json` for `usagegate.py`. |
 | `timing_probe.py` | Host-noise probe that `heavyrun` runs before and after a timing job (~10 s each). |
@@ -239,7 +239,8 @@ next pass, and priority tickets always stay first. The Tower tab reads the memgu
 `8-18`). It reads the agentq log (`HANGAR_QUEUE_JSONL`, default `~/.config/memguard/queue/agents.jsonl`, see "Queue tracking via hooks" below), or,
 without it, the newest markdown file matched by `HANGAR_QUEUE_FILE` (a path or a glob such as `~/notes/AGENT_QUEUE_*.md`; rows `R<id>` under
 `## Running`, `Q<id>` under `## Queued` or `## PENDING`, `F<id>` under `## Finished`; `~~struck~~` rows are skipped). With neither, there is no Queue
-tab. Read-only, no network, re-read at most once a minute while the tab is open.
+tab. Read-only, no network, re-read at most once a minute while the tab is open. Once agents carry a department (see "Departments" below), the
+tab also lists running agents per department and marks any department over 10 (`HANGAR_SUPERVISOR_OVER`) as **needs supervisor**.
 
 ```bash
 hangar/build.sh                 # builds and installs ~/Applications/Hangar.app (an old copy goes to the Trash)
@@ -290,6 +291,29 @@ Test the command before installing it: `printf '%s' '{"hook_event_name":"Subagen
 must print `0`. Settings: `AGENTQ_DIR` (default `~/.config/memguard/queue`), `AGENTQ_MD_DIR` (where the dated view goes, default `AGENTQ_DIR`),
 `AGENTQ_STALE_HOURS` (2), `AGENTQ_BUSINESS_HOURS` (`8-18`), `AGENTQ_LOST_HOURS` (12: an agent with no finish after this long counts as lost, not
 running). Tests: `tests/test_agentq.py`.
+
+### Departments (roles)
+
+When I started running 20+ agents I gave them roles. That drifted into generic "oversight" agents watching everyone, which didn't work well: a
+watcher that knows a bit about everything catches little. So the agents are now grouped by function (firmware, apps, QA, security, research,
+growth and so on), each department has a head that briefs its workers and reviews their work, and the heads report to one coordinating session.
+The org model and the rules behind it are in [agent-governance](https://github.com/tsmartin29/agent-governance). memguard's part is
+bookkeeping: which agent belongs to which department, and when a department has grown past what one head can review.
+
+- Tag an agent by starting its description with `[dept:<Name>]`, e.g. `[dept:QA] Run the scenario suite`. The prefix is stripped from what is
+  shown. Or set `AGENTQ_DEPT=<Name>` when you start a head's session: the hooks run in that session's environment, so everything it spawns is
+  tagged. The prefix wins over the variable; agents with neither are "Unassigned".
+- `queue tag R3 Security` (or an agent id) puts an agent that is already running into a department; the latest tag wins.
+- `queue list` groups running agents by department, biggest first; `queue list QA` shows one; `queue depts` prints the counts.
+- A department with more than 10 running agents (`AGENTQ_SUPERVISOR_OVER`) is flagged **needs supervisor** in `queue status`, `queue depts`,
+  the markdown view (a Dept column and a Departments table) and Hangar's Queue tab. That is the point where its head may spawn a supervisor.
+
+Nothing changes until an agent carries a department: untagged setups show exactly what they did before.
+
+<p>
+<img src="hangar/shots/hangar_queue_depts_light.png" width="300" alt="Hangar Queue tab with departments, light mode">
+<img src="hangar/shots/hangar_queue_depts_dark.png" width="300" alt="Hangar Queue tab with departments, dark mode">
+</p>
 
 ### Tuning for your Mac
 
