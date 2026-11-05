@@ -182,7 +182,7 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
       var a = agents[k]!
       if a.desc.isEmpty, let d = (e["desc"] as? String) ?? (e["prompt"] as? String) { a.desc = d }
       if (e["ev"] as? String) == "finish" { a.lastEnd = max(a.lastEnd, ts); if a.start == .infinity { a.start = ts } }
-      else { a.start = min(a.start, ts); if (e["ev"] as? String) == "start" { a.lastStart = max(a.lastStart, ts) } }
+      else { a.start = min(a.start, ts); if (e["ev"] as? String) == "start" && e["via"] == nil { a.lastStart = max(a.lastStart, ts) } }   // a PostToolUse row (via: post) can land after the finish
       agents[k] = a
     case "pending_add": if let p = e["pid"] as? String { pend.append((p, e["text"] as? String ?? "")) }
     case "pending_done": if let p = e["pid"] as? String { done.insert(p) }

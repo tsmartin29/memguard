@@ -110,10 +110,11 @@ def fold(events, now=None):
                 if e.get(f) and not a.get(f): a[f] = e[f]
             if ev in ("start", "info"):
                 a["start"] = ts if a["start"] is None else min(a["start"], ts)
-                if ev == "start": a["last_start"] = max(a["last_start"], ts)
+                if ev == "start" and e.get("via") != "post": a["last_start"] = max(a["last_start"], ts)   # PostToolUse can arrive after the finish
             else:
                 a["end"] = max(a["end"] or 0, ts); a["last_end"] = max(a["last_end"], ts)
-                if e.get("result"): a["result"] = e["result"]
+                r = e.get("result") or ""
+                if r and not a.get("result") and not r.startswith("This agent's report was delivered"): a["result"] = r   # the agent's own last message wins
         elif ev == "pending_add" and e.get("pid"):
             pend[e["pid"]] = {"pid": e["pid"], "text": e.get("text", ""), "added": ts, "done": None, "note": ""}
         elif ev == "pending_done" and e.get("pid") in pend:
@@ -225,7 +226,7 @@ def hook_events(p):
         resp = json.dumps(p.get("tool_response"), ensure_ascii=False) if p.get("tool_response") is not None else ""
         m = re.search(r'agent_?[iI]d\\?"?\s*[:=]\s*\\?"?([A-Za-z0-9_-]{6,})', resp)
         tuid = p.get("tool_use_id") or ""
-        e = dict(base, ev="start", id=m.group(1) if m else tuid, tuid=tuid, desc=one_line(ti.get("description"), 120),
+        e = dict(base, ev="start", via="post", id=m.group(1) if m else tuid, tuid=tuid, desc=one_line(ti.get("description"), 120),
                  model=ti.get("model") or "", type=ti.get("subagent_type") or "general-purpose", prompt=one_line(ti.get("prompt"), 160),
                  bg=bool(ti.get("run_in_background", True)))
         e = {k: v for k, v in e.items() if v not in ("", None)}

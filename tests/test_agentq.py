@@ -44,6 +44,14 @@ class AgentQ(unittest.TestCase):
         self.hook({"hook_event_name": "SubagentStop", "agent_id": "abc123def", "agent_transcript_path": os.path.join(sub, "agent-abc123def.jsonl")})
         s = self.state(); self.assertEqual((s["running"], s["finished_today"]), (0, 1))
 
+    def test_post_tool_use_after_finish_stays_finished(self):   # a fast background agent: SubagentStop lands before PostToolUse
+        self.hook({"hook_event_name": "SubagentStart", "agent_id": "fast1234"})
+        self.hook({"hook_event_name": "SubagentStop", "agent_id": "fast1234", "last_assistant_message": "OK"})
+        self.hook({"hook_event_name": "PostToolUse", "tool_name": "Agent", "tool_use_id": "t5", "tool_input": {"description": "fast"},
+                   "tool_response": "Async agent launched. agentId: fast1234"})
+        s = self.state(); self.assertEqual((s["running"], s["finished_today"]), (0, 1))
+        self.assertIn("| OK |", self.md())
+
     def test_fails_open(self):
         for bad in ("not json", "", "[]", json.dumps({"hook_event_name": "SubagentStop"}), json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash"})):
             self.assertEqual(self.hook(bad), 0)
