@@ -15,14 +15,17 @@ and memguard's rules are unchanged. It drops back to off by itself when the time
 Disk safety: free disk under 10 GB prints a warning in `status`, and a count above 20 (Surge, Close Air Support, or Custom 21-40) refuses to turn on
 until there is 10 GB free (more agents means more builds and caches).
 State: scramble.json {on, mode, since, until, reason, target_agents, queue}; your orchestrating session reads target_agents and mode.
+Racing names (Nov 5, 2026): Safety Car = cap (12), Race Pace = on/scramble (20), Quali Mode = surge (25), Full Send = cas (30).
+  scramble safety-car | race-pace | quali | full-send   also work; the old verbs (cap, on, surge, cas, warthog) stay as aliases, and
+  scramble.json keeps the old mode keys (cap, scramble, surge, cas, custom) so existing readers are unchanged.
 """
 import json, os, re, shutil, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TARGET = int(os.environ.get("SCRAMBLE_TARGET", "20"))   # what `on` means; Claude Code concurrent-subagent cap by default
-MODES = {"cap": 12, "on": TARGET, "scramble": TARGET, "surge": 25, "cas": 30, "warthog": 30}   # warthog = the first name of CAS, kept as an alias
-MODE_NAME = {"cap": "cap", "on": "scramble", "scramble": "scramble", "surge": "surge", "cas": "cas", "warthog": "cas"}
-LABEL = {"cap": "CAP", "scramble": "Scramble", "surge": "Surge", "cas": "Close Air Support", "custom": "Custom"}
+MODES = {"cap": 12, "on": TARGET, "scramble": TARGET, "surge": 25, "cas": 30, "warthog": 30, "safety-car": 12, "safety": 12, "race-pace": TARGET, "pace": TARGET, "quali": 25, "quali-mode": 25, "full-send": 30, "send": 30}   # warthog = the first name of CAS, kept as an alias
+MODE_NAME = {"cap": "cap", "on": "scramble", "scramble": "scramble", "surge": "surge", "cas": "cas", "warthog": "cas", "safety-car": "cap", "safety": "cap", "race-pace": "scramble", "pace": "scramble", "quali": "surge", "quali-mode": "surge", "full-send": "cas", "send": "cas"}
+LABEL = {"cap": "Safety Car", "scramble": "Race Pace", "surge": "Quali Mode", "cas": "Full Send", "custom": "Custom"}   # racing names (Nov 5, 2026); stored mode keys unchanged
 MIN_N, MAX_N = 1, 40
 LOW_DISK_GB = 10        # warn under this; refuse counts above NORMAL_MAX under it
 NORMAL_MAX = 20
@@ -113,9 +116,9 @@ def main(argv):
         st.update(on=False, ended=" ".join(argv[2:]) or "owner"); save(st); print("scramble OFF")
     else:
         free = disk_free_gb(); low = disk_low(free); n = st.get("target_agents", TARGET); mode = mode_of(st)
-        if st.get("on"): print("scramble ON (%s), %d min left, target %d agents, queue %s" % (LABEL[mode], left_min(st), n, st.get("queue")))
+        if st.get("on"): print("scramble ON (%s), %d min left, target %d agents, queue %s" % (LABEL[mode], left_min(st), n, (queue_file() or st.get("queue"))))
         else: print("scramble off")
-        if low: print("WARNING: disk low, %.1f GB free (under %d GB). Surge, Close Air Support and Custom above %d refuse to start until there is room." % (free, LOW_DISK_GB, NORMAL_MAX))
+        if low: print("WARNING: disk low, %.1f GB free (under %d GB). Quali Mode, Full Send and Custom above %d refuse to start until there is room." % (free, LOW_DISK_GB, NORMAL_MAX))
         print(json.dumps({"scramble": bool(st.get("on")), "scramble_left_min": left_min(st), "target_agents": n, "mode": mode,
                           "disk_free_gb": None if free is None else round(free, 1), "disk_low": low}))
     return 0
