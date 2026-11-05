@@ -14,9 +14,10 @@ Run 20-30 Claude Code sessions on a 24 GB laptop and sooner or later two of them
 |---|---|
 | `memguard.py` | The guard. One pass per run (launchd runs it every 15 s). Pauses (`SIGSTOP`) the biggest session job when available memory is low, kills it when memory is critical, resumes jobs one by one when memory recovers, stops the lowest-ranked paused job if memory stays low too long, holds new heavy jobs when the disk is nearly full or swap is high while memory is short, alerts you once when a queued job has waited too long, copes with macOS sitting at pressure level 2 for hours, and dispatches the `heavyrun` queue (both lanes, with an optional drag-and-drop `manual_order`, and the timing lane's quiet window). |
 | `heavyrun` | Wrapper agents use to run heavy work: `heavyrun "<session>: <job>" <command...>`. Up to 3 jobs at once (memory permitting) plus a light lane for short small jobs. Runs commands with `nice -n 15`. `HEAVY_TIMING=1` adds the timing lane (below); `heavyrun --selftest-timing` is a dry run of it. |
-| `afterburner.py`, `afterburner` | Afterburner: `afterburner on 2h` raises the queue caps for a while (more heavy jobs as memory allows, a second light slot, `nice -n 10`) and drops back to normal by itself. |
+| `afterburner.py`, `afterburner` | Afterburner (DRS in Hangar; `drs` is an alias): `afterburner on 2h` raises the queue caps for a while (more heavy jobs as memory allows, a second light slot, `nice -n 10`) and drops back to normal by itself. |
 | `tidy.py`, `tidy` | One step to clean build output to the Trash, push unpushed branches and back up to an attached drive. `tidy --dry-run` shows the plan. |
-| `hangar/` | Hangar, an optional SwiftUI menu-bar app with buttons for afterburner, tidy, save and backup (`Hangar.swift`, `build.sh`, `shots/`). |
+| `hangar/` | Hangar, an optional SwiftUI menu-bar app with buttons for DRS (afterburner), the agent modes, tidy, save and backup (`Hangar.swift`, `build.sh`, `shots/`). |
+| `agentq.py`, `agentq` | Queue tracking via Claude Code hooks: every agent start and finish logged to `agents.jsonl`, a dated markdown view, and a PENDING backlog (`queue add` / `queue done`). |
 | `usagegate.py` | The usage-limit prompt (Claude Code plans): asks what to do when weekly usage gets high, and holds the queue if you say so. Called by `memguard.py` every pass and by `heavyrun`. |
 | `usage_statusline.py` | Claude Code `statusLine` hook that feeds `usage.json` for `usagegate.py`. |
 | `timing_probe.py` | Host-noise probe that `heavyrun` runs before and after a timing job (~10 s each). |
@@ -190,96 +191,137 @@ Start with `tidy --dry-run` after you fill in the `tidy` block; with the default
 ### Hangar (menu-bar app)
 
 <p>
-<img src="hangar/shots/hangar_panel_light.png" width="300" alt="Hangar panel, light mode">
-<img src="hangar/shots/hangar_afterburner_on_dark.png" width="300" alt="Hangar with afterburner on, dark mode">
+<img src="hangar/shots/hangar_window_e46_light@2x.png" width="300" alt="Hangar panel, Race Pace, light mode">
+<img src="hangar/shots/hangar_window_f1_dark@2x.png" width="300" alt="Hangar panel, Full Send, dark mode">
 </p>
 
-Hangar is a small SwiftUI menu-bar app: click the plane and a panel opens with an F-22 button for afterburner and jet call-signs for the rest: **Jettison** (tidy, a broom), **Wheels Up** (save + push), **Black Box** (backup) and a red-orange **Alpha Strike** button (three jets in a V) that does all three at once. The Cockpit buttons only run `afterburner` and `tidy` and show their result line. Jettison, Black Box and Alpha Strike first show the `--dry-run` plan and wait for one Confirm. The plane in the menu bar shows the time left while afterburner is on.
+Hangar is a small SwiftUI menu-bar app with racing names. Click the car in the menu bar and a panel opens:
 
-A segmented Cockpit / Tower picker at the top switches to the **Tower** tab: the heavy and light lanes with their running slots (pid check, run time), the queued and held tickets (priority jobs marked with a star) and the last few `heavy_queue.log` lines, refreshed every 5 seconds while the panel is open. **Drag a queued job** to reorder it: Hangar writes memguard's `manual_order` file (ticket names, one per line), memguard uses it on its next pass, and priority tickets always stay first. The Tower tab reads the memguard directory from `HANGAR_MEMGUARD_DIR`, else `MEMGUARD_HOME`, else `~/.config/memguard`.
+| Button | What it runs | Old name (still a CLI alias) |
+|---|---|---|
+| **DRS** | `afterburner on 2h` / `off`: more machine for a while | Afterburner (`drs` is linked next to `afterburner`) |
+| **Agent mode** tile | `scramble`: Safety Car 12, Race Pace 20, Quali Mode 25, Full Send 30, Custom 1-40, Off | CAP, Scramble, Surge, Close Air Support |
+| **Box Box** | `tidy --only clean`: old build output to the Trash | Jettison |
+| **Lights Out** | `tidy --only save`: save and push branches | Wheels Up |
+| **Telemetry** | `tidy --only backup`: backup to the drive | Black Box |
+| **Pit Stop** | `tidy`: all three in one stop | Alpha Strike |
+
+The buttons only run `afterburner`, `scramble` and `tidy` and show their result line. Box Box, Telemetry and Pit Stop first show the `--dry-run` plan
+and wait for one Confirm. The menu bar shows a monochrome car that follows the agent mode: a sports coupe for Safety Car and Race Pace, a V8-era
+single-seater for Quali Mode and Full Send (and Custom 25+), plus `DRS 1h 35m` while DRS is open. Both cars are original vector art drawn in
+`Hangar.swift` (no badges, logos or liveries; the single-seater is matte black with an orange accent); `HANGAR_ART=<dir>` writes them as SVG, PDF
+and 1x/2x PNG (`hangar/shots/art/`).
+
+<p>
+<img src="hangar/shots/hangar_menubar_e46_light@2x.png" width="330" alt="menu bar, coupe, light">
+<img src="hangar/shots/hangar_menubar_f1_dark@2x.png" width="330" alt="menu bar, single-seater, dark">
+</p>
+
+**No screen animations.** Hangar never draws over your screen. The only effect is a short engine blip (2 s or less), synthesised in code and played
+only when you click a button: a straight-six rev to about 7,000 rpm for the coupe modes, a 2.4 L V8 to about 18,000 rpm for the single-seater modes.
+Nothing plays on launch, on a timer, on a mode change made elsewhere, or while agents work. The **Engine sound** switch (or `HANGAR_SOUND=off`) mutes
+it; the system volume and mute still apply. `HANGAR_ENGINE_WAV=<file> HANGAR_ENGINE=e46|f1` writes the blip to a WAV without playing it
+(`hangar/shots/engine_e46.wav`, `engine_f1.wav`). Tests: `tests/test_hangar_engine.py`.
+
+A segmented Cockpit / Tower / Queue picker at the top switches tabs. **Tower** shows the heavy and light lanes with their running slots (pid check,
+run time), the queued and held tickets (priority jobs marked with a star) and the last few `heavy_queue.log` lines, refreshed every 5 seconds while the
+panel is open. **Drag a queued job** to reorder it: Hangar writes memguard's `manual_order` file (ticket names, one per line), memguard uses it on its
+next pass, and priority tickets always stay first. The Tower tab reads the memguard directory from `HANGAR_MEMGUARD_DIR`, else `MEMGUARD_HOME`, else
+`~/.config/memguard`.
 
 <p>
 <img src="hangar/shots/hangar_lanes_light.png" width="300" alt="Hangar Tower tab, light mode">
-<img src="hangar/shots/hangar_lanes_dark.png" width="300" alt="Hangar Tower tab, dark mode">
+<img src="hangar/shots/hangar_queue_stale_dark.png" width="300" alt="Hangar Queue tab, stale, dark mode">
 </p>
 
-**Queue tab (optional, off until you set a file).** Set `HANGAR_QUEUE_FILE` to a markdown task list, or to a glob such as `~/notes/AGENT_QUEUE_*.md` (the newest name wins, so dated files roll over by themselves), and a third **Queue** segment appears: the running count, the queued count, the next three queued jobs, and when the file was last modified. The "updated" line turns amber with a warning icon when the file is more than 45 minutes old, which is the cue that whatever refreshes it has stopped. Unset, the tab does not exist. The tab is read-only (it never writes the file), makes no network calls, and re-reads at most once a minute, and only while the panel is open on that tab. The file format is two tables: rows under a `## Running` heading whose first cell is `R<id>` count as running, rows under `## Queued` whose first cell is `Q<id>` count as queued, in file order; `~~struck~~` rows, other sections and prose are ignored. `tests/fixtures/agent_queue_sample.md` is a small example.
-
-<p>
-<img src="hangar/shots/hangar_queue_light.png" width="300" alt="Hangar Queue tab, light mode">
-<img src="hangar/shots/hangar_queue_stale_dark.png" width="300" alt="Hangar Queue tab with a stale file, dark mode">
-</p>
+**Queue tab.** Shows how many agents are running, how many finished today and how many PENDING items wait, the next three pending items, and a
+**STALE** banner when the newest entry is older than 2 hours inside business hours (`HANGAR_QUEUE_STALE_HOURS`, `HANGAR_BUSINESS_HOURS`, default
+`8-18`). It reads the agentq log (`HANGAR_QUEUE_JSONL`, default `~/.config/memguard/queue/agents.jsonl`, see "Queue tracking via hooks" below), or,
+without it, the newest markdown file matched by `HANGAR_QUEUE_FILE` (a path or a glob such as `~/notes/AGENT_QUEUE_*.md`; rows `R<id>` under
+`## Running`, `Q<id>` under `## Queued` or `## PENDING`, `F<id>` under `## Finished`; `~~struck~~` rows are skipped). With neither, there is no Queue
+tab. Read-only, no network, re-read at most once a minute while the tab is open.
 
 ```bash
 hangar/build.sh                 # builds and installs ~/Applications/Hangar.app (an old copy goes to the Trash)
 hangar/build.sh --no-install    # build only, into hangar/build (or HANGAR_OUT=<dir>)
 ```
 
-Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs no admin rights. Clicking the plane opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the panel. `HANGAR_TIDY`, `HANGAR_AFTERBURNER` and `HANGAR_SCRAMBLE` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>` renders the screenshots in `hangar/shots/` offscreen, without a menu-bar item; the ones here were taken with a sample config and a made-up queue (`HANGAR_MEMGUARD_DIR` pointed at a scratch folder).
+Needs macOS 13+ and the Xcode command line tools (`swiftc`); no Xcode project. The app is ad-hoc signed, has no network access of its own and needs
+no admin rights. Clicking the car opens the panel as a small window kept inside the visible screen area, and opening the app again (Finder or
+Spotlight) shows it centered, which helps when the menu bar icon is hidden behind the notch. "Open at login" is off until you switch it on in the
+panel. `HANGAR_TIDY`, `HANGAR_AFTERBURNER` and `HANGAR_SCRAMBLE` override where it finds the commands (default `~/.local/bin`). `HANGAR_SHOT=<dir>`
+renders the screenshots in `hangar/shots/` offscreen (1x and 2x, light and dark), without a menu-bar item.
 
-### Screen animations
+### Queue tracking via hooks
 
-Each Hangar action plays one short animation across the main screen when you take it (about 2 to 3.5 seconds, once per action, never on launch,
-refresh or a timer, and never more than one per 20 seconds). Everything is drawn in the app (vector shapes and CoreAnimation) and the sound is
-synthesised sample by sample in code: no image files, no recorded audio. The overlay is a transparent, click-through window that never takes focus;
-Reduce Motion skips it. The panel has two switches, **Animations** and **Flyover sound** (both on by default); the sound follows the system volume and mute.
+A hand-edited queue file goes stale the first time nobody remembers to edit it. `agentq` keeps it current with Claude Code hooks instead: every
+agent start and finish is appended to `agents.jsonl`, and a dated `AGENT_QUEUE_<date>.md` view (Running, PENDING, Finished) is regenerated from it.
+The hook never blocks a tool call: errors go to `hook_errors.log` and it always exits 0.
 
-| Action | Animation |
+| Event | Row |
 |---|---|
-| Afterburner ON | a fighter streaks across with both plumes lit, a vapor collar swells around it, then pops with a double-crack sonic boom |
-| Jettison | a fighter crosses, the drop tank releases, tumbles and falls off the bottom of the screen (whoosh, light clunk) |
-| Wheels Up | a carrier launch seen from above: steam along the catapult, the jet is slung off the bow, dips, climbs out and folds its gear |
-| Black Box | the orange flight recorder drops in, bounces and pings its locator beacon with ripple rings (gentle beeps) |
-| Alpha Strike | a three-ship V sweeps across (one combined pass) |
-| CAP / Scramble / Surge | a 2-, 4- or 6-ship formation pass |
-| Close Air Support (30) | an A-10 dives from the top-left toward the bottom-right with a gun burst, pulls up; fireballs, smoke and booms bloom at the bottom-right |
+| `SubagentStart`, `PostToolUse` on `Agent`/`Task` | STARTED: time, description, model, agent type, first prompt line |
+| `SubagentStop` (or a foreground `Agent` call returning) | FINISHED: time, first line of the agent's last message |
 
-While the mode is Close Air Support (or the target is 30 or more) the menu bar shows a small A-10 silhouette next to the plane, a monochrome
-template image that follows light and dark menu bars. Mode animations fire when `scramble.json` shows a real switch (off to a mode, or one mode to
-another, from the CLI or the tile); renewing the same mode is silent.
+The backlog is a small CLI (`install.sh` links `agentq` and `queue` into `~/.local/bin`):
 
-<p>
-<img src="hangar/shots/hangar_menubar_a10_zoom_light.png" width="420" alt="menu bar: plane and A-10, light">
-<img src="hangar/shots/hangar_scramble_cas_on_dark.png" width="220" alt="Close Air Support tile, dark">
-</p>
-<img src="hangar/shots/hangar_anim_dive.png" width="900" alt="Close Air Support dive, frame strip">
-<img src="hangar/shots/hangar_anim_afterburner.png" width="900" alt="Afterburner sonic boom, frame strip">
-<img src="hangar/shots/hangar_anim_wheels.png" width="900" alt="Wheels Up carrier launch, frame strip">
+```bash
+queue add "Redeploy the docs site"   # -> Q1 added
+queue done Q1 "shipped"              # mark it done
+queue list                           # running agents and pending items; `queue status` prints one line, STALE included
+queue backfill ~/.claude/projects/<project>/<session>/subagents   # rebuild a day from Claude Code subagent transcripts
+```
 
-More strips and short clips (`anim_<scene>.mp4`, no sound) are in `hangar/shots/`. They are rendered **offscreen**: `HANGAR_SHOT=<dir>` builds each scene
-in a window parked far off screen, steps it frame by frame and writes `<dir>/anim/<scene>/fNNN.png` plus a strip per scene, so nothing ever plays on
-your display while testing. To hear or see one for real: `HANGAR_FLYOVER=<dive|afterburner|jettison|wheels|blackbox|alpha|cap|scramble|surge>
-~/Applications/Hangar.app/Contents/MacOS/Hangar` plays it once and exits (`HANGAR_FLYOVER_SOUND=off` mutes it); `HANGAR_FLYOVER_WAV=<file>` writes the
-scene's sound to a WAV instead. Tests: `tests/test_hangar_animations.py`.
+Hook config (merge into `~/.claude/settings.json` under `"hooks"`, next to any hooks you already have; back the file up first and check it with
+`jq -e . ~/.claude/settings.json`):
+
+```json
+{
+  "PostToolUse":   [{ "matcher": "Agent|Task", "hooks": [{ "type": "command", "timeout": 10,
+                      "command": "[ -x \"$HOME/.local/bin/agentq\" ] && \"$HOME/.local/bin/agentq\" hook; exit 0" }] }],
+  "SubagentStart": [{ "hooks": [{ "type": "command", "timeout": 10,
+                      "command": "[ -x \"$HOME/.local/bin/agentq\" ] && \"$HOME/.local/bin/agentq\" hook; exit 0" }] }],
+  "SubagentStop":  [{ "hooks": [{ "type": "command", "timeout": 10,
+                      "command": "[ -x \"$HOME/.local/bin/agentq\" ] && \"$HOME/.local/bin/agentq\" hook; exit 0" }] }]
+}
+```
+
+Test the command before installing it: `printf '%s' '{"hook_event_name":"SubagentStart","agent_id":"t1"}' | AGENTQ_DIR=/tmp/aq agentq hook; echo $?`
+must print `0`. Settings: `AGENTQ_DIR` (default `~/.config/memguard/queue`), `AGENTQ_MD_DIR` (where the dated view goes, default `AGENTQ_DIR`),
+`AGENTQ_STALE_HOURS` (2), `AGENTQ_BUSINESS_HOURS` (`8-18`), `AGENTQ_LOST_HOURS` (12: an agent with no finish after this long counts as lost, not
+running). Tests: `tests/test_agentq.py`.
 
 ### Tuning for your Mac
 
 The defaults suit a 24 GB machine: pause under 6 GB available, kill under 3 GB, resume over 9 GB. On 16 GB try `pause_avail_gb 4`, `kill_avail_gb 2`, `resume_avail_gb 6`, `slot2_avail_gb 8`, `slot3_avail_gb 12`. To force a strict one-at-a-time queue set `max_heavy_jobs` to 1 and `slot2_avail_gb` very high. Run `--dry-run` for a day to see what it would have done.
 
-## Scramble
+## Scramble (agent modes)
 
 A standing order for an orchestrating agent session (e.g. Claude Code): keep this many agents running, refilling each slot from the
-newest `AGENT_QUEUE_*.md` in `SCRAMBLE_QUEUE_DIR` (default `~/.config/memguard`) as agents finish. Afterburner gives the machine more
-muscle (heavy-lane caps); Scramble keeps the agent slots busy. Memory floors and every memguard rule stay as they are. It turns itself
+newest `AGENT_QUEUE_*.md` in `SCRAMBLE_QUEUE_DIR` (default `~/.config/memguard`) as agents finish. DRS (afterburner) gives the machine more
+muscle (heavy-lane caps); the agent mode keeps the agent slots busy. Memory floors and every memguard rule stay as they are. It turns itself
 off when the time is up (default 8 h).
 
-| Command | Mode | Agents |
-|---|---|---|
-| `scramble cap [duration] [reason]` | CAP (combat air patrol) | 12 |
-| `scramble on [duration] [reason]` | Scramble | 20 (`SCRAMBLE_TARGET` changes what `on` means) |
-| `scramble surge [duration] [reason]` | Surge | 25 |
-| `scramble cas [duration] [reason]` | Close Air Support (CAS; `warthog` is an alias) | 30 |
-| `scramble set N [duration] [reason]` | Custom | any N from 1 to 40 |
-| `scramble off` / `scramble status` | | |
+| Command | Mode | Agents | Old name (alias) |
+|---|---|---|---|
+| `scramble safety-car [duration] [reason]` | Safety Car | 12 | CAP (`cap`) |
+| `scramble race-pace [duration] [reason]` | Race Pace | 20 (`SCRAMBLE_TARGET` changes it) | Scramble (`on`) |
+| `scramble quali [duration] [reason]` | Quali Mode | 25 | Surge (`surge`) |
+| `scramble full-send [duration] [reason]` | Full Send | 30 | Close Air Support (`cas`, `warthog`) |
+| `scramble set N [duration] [reason]` | Custom | any N from 1 to 40 | |
+| `scramble off` / `scramble status` | | | |
 
-`scramble.json` holds `{on, mode, target_agents, since, until, reason, queue}`; the session reads `target_agents` to know how many agents to keep
-running. `scramble status` also prints a JSON line with `mode`, `disk_free_gb` and `disk_low`.
+`scramble.json` holds `{on, mode, target_agents, since, until, reason, queue}` and keeps the original mode keys (`cap`, `scramble`, `surge`, `cas`,
+`custom`), so existing readers keep working; the session reads `target_agents` to know how many agents to keep running. `scramble status` also prints
+a JSON line with `mode`, `disk_free_gb` and `disk_low`.
 
-Disk safety: with under 10 GB free, `status` prints a warning, and Surge, Close Air Support or Custom above 20 refuse to turn on (the message says why), since more
-agents means more builds and caches. CAP, Scramble and Custom up to 20 still start, with the warning. `SCRAMBLE_FREE_GB` fakes the free-disk figure (tests).
+Disk safety: with under 10 GB free, `status` prints a warning, and Quali Mode, Full Send or Custom above 20 refuse to turn on (the message says why),
+since more agents means more builds and caches. Safety Car, Race Pace and Custom up to 20 still start, with the warning. `SCRAMBLE_FREE_GB` fakes the
+free-disk figure (tests).
 
-Hangar's Scramble tile is a mode picker in the same footprint: click the name for CAP 12 / Scramble 20 / Surge 25 / Close Air Support 30 / Custom (with a - / + stepper, 1 to 40) / Off;
-tap the tile to launch or land. Green glow when on, the label shows the count; amber with "disk low" under 10 GB free. Tests: `tests/test_scramble.py`.
+Hangar's agent-mode tile is a mode picker in the same footprint: click the name for Safety Car 12 / Race Pace 20 / Quali Mode 25 / Full Send 30 /
+Custom (with a - / + stepper, 1 to 40) / Off; tap the tile to start or stop. Green glow when on; amber with "disk low" under 10 GB free. Tests:
+`tests/test_scramble.py`.
 
 ## Known limits
 

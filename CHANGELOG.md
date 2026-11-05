@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-05 (queue tracking via hooks, racing names, no screen animations)
+- New **agentq** (`agentq.py`, `agentq`, linked as `agentq` and `queue`): Claude Code hooks (`SubagentStart`, `SubagentStop`, `PostToolUse` on `Agent`/`Task`) append every agent start and finish to `queue/agents.jsonl` and regenerate a dated `AGENT_QUEUE_<date>.md` view; `queue add` / `queue done` keep a PENDING backlog; `queue backfill` rebuilds a day from subagent transcripts. The hook fails open (always exits 0, errors to `hook_errors.log`). README: "Queue tracking via hooks". Tests: `tests/test_agentq.py`.
+- Hangar Queue tab reads the agentq log first (`HANGAR_QUEUE_JSONL`), shows running / finished today / pending, and a **STALE** banner when the newest entry is older than 2 h in business hours (`HANGAR_QUEUE_STALE_HOURS`, `HANGAR_BUSINESS_HOURS`). The markdown fallback now also reads `## PENDING` and `## Finished` sections.
+- Racing names: DRS (afterburner), Box Box (clean), Lights Out (save + push), Telemetry (backup), Pit Stop (all three); agent modes Safety Car 12, Race Pace 20, Quali Mode 25, Full Send 30. `scramble safety-car | race-pace | quali | full-send` added; the old verbs stay as aliases and `scramble.json` keeps its mode keys. `drs` is linked next to `afterburner`.
+- Hangar art: original vector side profiles (a straight-six sports coupe for Safety Car / Race Pace, a V8-era single-seater for Quali Mode / Full Send), as the menu-bar template image and in colour in the panel; `HANGAR_ART=<dir>` exports SVG, PDF and 1x/2x PNG.
+- Removed all screen animations, the A-10 icon and the flyover sounds. The only effect left is a short synthesised engine blip (2 s or less) on a click, with an **Engine sound** switch (`HANGAR_SOUND=off`). `HANGAR_ENGINE_WAV=<file>` writes it to a WAV. Tests: `tests/test_hangar_engine.py` (replaces `test_hangar_animations.py`).
+
 ## 2026-11-04 (Close Air Support and screen animations)
 - New Scramble mode **Close Air Support (CAS)**: `scramble cas` keeps 30 agents running (`scramble warthog` is kept as an alias; `scramble.json` mode `cas`). Same disk rule as Surge: refuses under 10 GB free. Custom stays 1 to 40. Tile menu item "Close Air Support · 30", tile label "CAS · 30".
 - Hangar menu bar: an original A-10 silhouette (vector, monochrome template image) sits next to the plane while the mode is CAS or the target is 30 or more.
