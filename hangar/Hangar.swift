@@ -129,6 +129,30 @@ func splitDept(_ s: String) -> (String, String) {
   let name = t[t.index(t.startIndex, offsetBy: 6)..<close].trimmingCharacters(in: .whitespaces)
   return (name, String(t[t.index(after: close)...]).trimmingCharacters(in: .whitespaces))
 }
+// Work board (Nov 5, 2026): agentq logs which agent touches which file in touches.jsonl beside the queue log, with an "overlap" row when a running
+// agent enters a file another running agent touched in the last HANGAR_BOARD_HOURS (2). The tab counts distinct overlaps (same repo, file and
+// pair of agents, the same count as `queue status`) and marks promoted agents ("promote" events in the queue log). Read-only.
+let BOARD_SECS = (Double(ENV["HANGAR_BOARD_HOURS"] ?? "") ?? 2) * 3600
+let TOUCHES_TAIL = UInt64(4 << 20)
+struct Promoted: Identifiable { let id: String; let role: String; let desc: String; let running: Bool }
+func touchesPath(_ queueLog: String) -> String { ((queueLog as NSString).deletingLastPathComponent as NSString).appendingPathComponent("touches.jsonl") }
+func readTail(_ path: String, _ limit: UInt64 = TOUCHES_TAIL) -> String {
+  guard let fh = FileHandle(forReadingAtPath: path) else { return "" }
+  defer { try? fh.close() }
+  let size = fh.seekToEndOfFile()
+  fh.seek(toFileOffset: size > limit ? size - limit : 0)
+  return String(decoding: fh.readDataToEndOfFile(), as: UTF8.self)   // a line cut by the limit fails the JSON parse and is skipped
+}
+func overlapCount(_ text: String, now: Date = Date()) -> Int {
+  var seen = Set<String>(); let t = now.timeIntervalSince1970
+  for raw in text.split(separator: "\n") where raw.contains("\"overlap\"") {
+    guard let d = raw.data(using: .utf8), let e = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any], (e["ev"] as? String) == "overlap",
+          t - ((e["ts"] as? Double) ?? 0) <= BOARD_SECS else { continue }
+    let pair = [(e["agent"] as? String) ?? "", (e["peer"] as? String) ?? ""].sorted()
+    seen.insert([(e["repo"] as? String) ?? "", (e["file"] as? String) ?? "", pair[0], pair[1]].joined(separator: "\u{1}"))
+  }
+  return seen.count
+}
 struct DeptCount: Identifiable { var id: String { name }; let name: String; let running: Int; var needsSupervisor: Bool { name != NO_DEPT && running > SUPERVISOR_OVER } }
 let BUSINESS_HOURS: (Int, Int) = {
   let parts = (ENV["HANGAR_BUSINESS_HOURS"] ?? "8-18").split(separator: "-").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
@@ -140,7 +164,7 @@ let QUEUE_AGE_SECS = (Double(ENV["HANGAR_QUEUE_AGE_HOURS"] ?? "") ?? 24) * 3600
 /// "26h" under two days, then "3d" (same as agentq's age tag).
 func queueAgeTag(_ secs: Double) -> String { let h = Int(secs / 3600); return h < 48 ? "\(h)h" : "\(h / 24)d" }
 struct QueueInfo {
-  var found = false, name = "", running = 0, finished = 0, queued = 0, top = [QItem](), mtime: Date? = nil, runningTop = [QItem](), depts = [DeptCount](), inProgress = 0, aged = 0
+  var found = false, name = "", running = 0, finished = 0, queued = 0, top = [QItem](), mtime: Date? = nil, runningTop = [QItem](), depts = [DeptCount](), inProgress = 0, aged = 0, collisions = 0, promoted = [Promoted]()
   var tagged: Bool { depts.contains { $0.name != NO_DEPT } }   // the department block shows only once agents carry a department
 }
 func queueStale(_ q: QueueInfo, now: Date = Date()) -> Bool {
@@ -192,7 +216,7 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
   for e in evs { if let i = e["id"] as? String, let t = e["tuid"] as? String, !t.isEmpty, i != t { alias[t] = i } }
   struct A { var start = Double.infinity, lastStart = 0.0, lastEnd = 0.0, desc = "", dept = "", qid = "" }
   struct P { let id: String; let text: String; let added: Double; var top = 0.0; var done = false; var started = false }
-  var agents = [String: A](), order = [String](), pend = [String: P](), done = Set<String>(), newest = 0.0
+  var agents = [String: A](), order = [String](), pend = [String: P](), done = Set<String>(), newest = 0.0, promos = [(agent: String, role: String)]()
   for e in evs {
     let ts = (e["ts"] as? Double) ?? 0; newest = max(newest, ts)
     switch e["ev"] as? String ?? "" {
@@ -207,6 +231,7 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
       if (e["ev"] as? String) == "finish" { a.lastEnd = max(a.lastEnd, ts); if a.start == .infinity { a.start = ts } }
       else { a.start = min(a.start, ts); if (e["ev"] as? String) == "start" && e["via"] == nil { a.lastStart = max(a.lastStart, ts) } }   // a PostToolUse row (via: post) can land after the finish
       agents[k] = a
+    case "promote": if let a = e["agent"] as? String { promos.removeAll { $0.agent == a }; promos.append((a, e["role"] as? String ?? "")) }
     case "pending_add": if let p = e["pid"] as? String { pend[p] = P(id: p, text: e["text"] as? String ?? "", added: ts, top: (e["top"] as? Bool ?? false) ? ts : 0) }
     case "pending_top": if let p = e["pid"] as? String, pend[p] != nil { pend[p]!.top = ts }
     case "pending_done": if let p = e["pid"] as? String { done.insert(p) }
@@ -242,6 +267,11 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
   q.depts = perDept.map { DeptCount(name: $0.key, running: $0.value) }
     .sorted { ($0.name == NO_DEPT ? 1 : 0, -$0.running, $0.name) < ($1.name == NO_DEPT ? 1 : 0, -$1.running, $1.name) }
   q.mtime = newest > 0 ? Date(timeIntervalSince1970: newest) : nil
+  q.promoted = promos.reversed().map { p in   // newest promotion first; the tab shows the last few
+    let a = agents[p.agent]
+    let up = a.map { !($0.lastEnd > 0 && $0.lastEnd >= $0.lastStart) && t - $0.start <= QUEUE_LOST_SECS } ?? false
+    return Promoted(id: p.agent, role: p.role, desc: (a?.desc.isEmpty ?? true) ? String(p.agent.prefix(8)) : a!.desc, running: up)
+  }
   return q
 }
 func newestQueueFile(_ pattern: String) -> String? {
@@ -253,7 +283,8 @@ func newestQueueFile(_ pattern: String) -> String? {
 }
 func readQueue() -> QueueInfo {
   if let text = try? String(contentsOfFile: QUEUE_JSONL, encoding: .utf8) {
-    var q = foldQueueLog(text); q.name = (QUEUE_JSONL as NSString).lastPathComponent; return q
+    var q = foldQueueLog(text); q.name = (QUEUE_JSONL as NSString).lastPathComponent
+    q.collisions = overlapCount(readTail(touchesPath(QUEUE_JSONL))); return q
   }
   guard let pat = QUEUE_PATTERN, let path = newestQueueFile(pat), let text = try? String(contentsOfFile: path, encoding: .utf8) else { return QueueInfo() }
   let r = parseQueue(text)
@@ -1031,6 +1062,30 @@ struct PanelView: View {
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.05)))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.2)))
       }
+      if q.collisions > 0 {
+        HStack(spacing: 6) {
+          Image(systemName: "exclamationmark.triangle").font(.system(size: 10))
+          Text("\(q.collisions) file overlap\(q.collisions == 1 ? "" : "s") in \(Int(BOARD_SECS / 3600)) h").font(.system(size: 11, weight: .semibold))
+          Spacer(minLength: 4)
+          Text("queue collisions").font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+        }
+        .foregroundStyle(AMBER).padding(.horizontal, 10).padding(.vertical, 5).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(AMBER.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AMBER.opacity(0.35)))
+      }
+      if !q.promoted.isEmpty {
+        VStack(alignment: .leading, spacing: 4) {
+          ForEach(q.promoted.prefix(3)) { p in
+            HStack(spacing: 6) {
+              Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(p.running ? Color.green : Color.secondary)
+              Text(p.role).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+              Text(p.desc).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+              Spacer(minLength: 0)
+            }
+          }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 2)
+      }
       VStack(alignment: .leading, spacing: 5) {
         HStack(spacing: 6) {
           Text(q.top.isEmpty ? (q.found ? "Nothing pending" : "No queue found") : "Next up").font(.system(size: 11.5, weight: .semibold))
@@ -1287,8 +1342,10 @@ if let f = ENV["HANGAR_QUEUE_PARSE"] {
   let now = Double(ENV["HANGAR_QUEUE_NOW"] ?? "").map { Date(timeIntervalSince1970: $0) } ?? Date()
   var j: [String: Any]
   if f.hasSuffix(".jsonl") {
-    let q = foldQueueLog(text, now: now)
-    j = ["running": q.running, "finished": q.finished, "queued": q.queued, "ids": q.top.map { $0.id }, "top": q.top.map { $0.text },
+    var q = foldQueueLog(text, now: now)
+    q.collisions = overlapCount(readTail(touchesPath(f)), now: now)
+    j = ["collisions": q.collisions, "promoted": q.promoted.map { ["role": $0.role, "desc": $0.desc, "running": $0.running] as [String: Any] },
+         "running": q.running, "finished": q.finished, "queued": q.queued, "ids": q.top.map { $0.id }, "top": q.top.map { $0.text },
          "in_progress": q.inProgress, "aged": q.aged, "tops": q.top.map { $0.top }, "ages": q.top.map { Int($0.ageSecs) },
          "newest": q.mtime?.timeIntervalSince1970 ?? 0, "stale": queueStale(q, now: now),
          "depts": Dictionary(uniqueKeysWithValues: q.depts.map { ($0.name, $0.running) }), "needs_supervisor": q.depts.filter { $0.needsSupervisor }.map { $0.name },

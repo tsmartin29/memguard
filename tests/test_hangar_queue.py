@@ -125,6 +125,27 @@ class QueueParser(unittest.TestCase):
         t = 1_800_000_000.0
         r = self.log([{"ev": "pending_add", "pid": "Q1", "text": "old", "ts": t - 30 * 3600}, {"ev": "pending_add", "pid": "Q2", "text": "newer", "ts": t - 100}], now=t)
         self.assertEqual((r["ids"], r["aged"], r["ages"]), (["Q2", "Q1"], 1, [100, 30 * 3600]))
+    def board(self, touches, now):
+        with open(os.path.join(self.d, "touches.jsonl"), "w") as fh: fh.write("".join(json.dumps(e) + "\n" for e in touches) + "garbled {\n")
+        try: return self.log([{"ev": "start", "id": "a1", "ts": now - 60}], now=now)
+        finally: os.remove(os.path.join(self.d, "touches.jsonl"))
+    def test_overlap_count_matches_agentq(self):   # distinct repo + file + pair, both directions are one, past 2 h does not count
+        t = 1_800_000_000.0
+        o = lambda a, p, f, age=60, r="~/r": {"ev": "overlap", "agent": a, "peer": p, "file": f, "repo": r, "ts": t - age}
+        self.assertEqual(self.board([o("a", "b", "x"), o("b", "a", "x"), o("a", "b", "x", 120), o("a", "c", "x"), o("a", "b", "y"), o("a", "b", "x", 60, "~/s"),
+                                     o("d", "e", "z", 3 * 3600), {"ev": "touch", "agent": "a", "file": "overlap", "repo": "~/r", "ts": t}], t)["collisions"], 4)
+        self.assertEqual(self.log([{"ev": "start", "id": "a1", "ts": t - 60}], now=t)["collisions"], 0)   # no touches file yet
+    def test_promoted_marker(self):
+        t = 1_800_000_000.0
+        r = self.log([{"ev": "start", "id": "a1", "desc": "Build the board", "ts": t - 60}, {"ev": "start", "id": "a2", "desc": "Old work", "ts": t - 600},
+                      {"ev": "finish", "id": "a2", "ts": t - 500}, {"ev": "promote", "agent": "a2", "role": "lead", "ts": t - 40}, {"ev": "promote", "agent": "a1", "role": "wrong", "ts": t - 30},
+                      {"ev": "promote", "agent": "a1", "role": "supervisor", "ts": t - 20}, {"ev": "promote", "agent": "unknownagent1", "role": "x", "ts": t - 10}], now=t)
+        self.assertEqual([(p["role"], p["desc"], p["running"]) for p in r["promoted"]],
+                         [("x", "unknowna", False), ("supervisor", "Build the board", True), ("lead", "Old work", False)])
+    def test_idea_and_promote_rows_do_not_disturb_the_queue(self):
+        t = 1_800_000_000.0
+        r = self.log([{"ev": "start", "id": "a1", "ts": t - 60}, {"ev": "idea_add", "iid": "I1", "text": "x", "ts": t - 50}, {"ev": "idea_adopt", "iid": "I1", "ts": t - 40}], now=t)
+        self.assertEqual((r["running"], r["queued"], r["promoted"]), (1, 0, []))
 
 if __name__ == "__main__":
     unittest.main()
