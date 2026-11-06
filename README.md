@@ -234,7 +234,7 @@ next pass, and priority tickets always stay first. The Tower tab reads the memgu
 <img src="hangar/shots/hangar_queue_stale_dark.png" width="300" alt="Hangar Queue tab, stale, dark mode">
 </p>
 
-**Queue tab.** Shows how many agents are running, how many finished today and how many PENDING items wait, the next three pending items, and a
+**Queue tab.** Shows how many agents are running, how many finished today and how many PENDING items wait, the next three pending items (priority first, then newest first; amber age tag after 24 h), and a
 **STALE** banner when the newest entry is older than 2 hours inside business hours (`HANGAR_QUEUE_STALE_HOURS`, `HANGAR_BUSINESS_HOURS`, default
 `8-18`). It reads the agentq log (`HANGAR_QUEUE_JSONL`, default `~/.config/memguard/queue/agents.jsonl`, see "Queue tracking via hooks" below), or,
 without it, the newest markdown file matched by `HANGAR_QUEUE_FILE` (a path or a glob such as `~/notes/AGENT_QUEUE_*.md`; rows `R<id>` under
@@ -268,10 +268,18 @@ The backlog is a small CLI (`install.sh` links `agentq` and `queue` into `~/.loc
 
 ```bash
 queue add "Redeploy the docs site"   # -> Q1 added
-queue done Q1 "shipped"              # mark it done
+queue add --top "Fix the login bug"  # priority: first in Next up
+queue top Q3                         # promote an existing item to priority
+queue done Q1 Q2 "shipped"           # close several at once; the first non-id word starts the note
 queue list                           # running agents and pending items; `queue status` prints one line, STALE included
 queue backfill ~/.claude/projects/<project>/<session>/subagents   # rebuild a day from Claude Code subagent transcripts
 ```
+
+**Next up stays current.** Pending items are shown priority first, then newest first (never oldest first). An agent whose description or prompt contains
+`[Q3]` puts item Q3 "in progress" when it starts (it leaves Next up) and closes it when it finishes; an agent that never finishes (lost after
+`AGENTQ_LOST_HOURS`) releases the item again. A finished agent whose description closely matches a pending item flags it `[maybe done: ...]` in
+`queue list`; it is never closed automatically. Items older than `AGENTQ_AGE_HOURS` (24) show their age, `queue status` counts them, and Hangar
+shows an amber age tag on them (`HANGAR_QUEUE_AGE_HOURS`).
 
 Hook config (merge into `~/.claude/settings.json` under `"hooks"`, next to any hooks you already have; back the file up first and check it with
 `jq -e . ~/.claude/settings.json`):

@@ -4,6 +4,7 @@ fixtures; skipped when swiftc is not installed. HANGAR_SWIFT=<file> tests a diff
 import json, os, shutil, subprocess, tempfile, unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.environ.get("HANGAR_SWIFT") or os.path.join(HERE, "hangar", "Hangar.swift")
+if not os.path.exists(SRC): SRC = os.path.join(HERE, "..", "hangar", "Hangar.swift")   # the private layout: memguard/ and hangar/ side by side
 FIX = os.path.join(HERE, "tests", "fixtures", "agent_queue_sample.md")
 
 @unittest.skipUnless(shutil.which("swiftc"), "swiftc not installed")
@@ -97,6 +98,33 @@ class QueueParser(unittest.TestCase):
     def test_jsonl_untagged_has_only_unassigned(self):
         r = self.log([{"ev": "start", "id": "a1", "ts": 1_799_999_990.0}], now=1_800_000_000.0)
         self.assertEqual((r["depts"], r["needs_supervisor"]), ({"Unassigned": 1}, []))
+
+    # Next up stays current (Nov 5, 2026): priority first, then newest first; [Qn] agents; age tags
+    def test_next_up_priority_then_newest_first(self):
+        t = 1_800_000_000.0
+        adds = [{"ev": "pending_add", "pid": "Q%d" % i, "text": "item %d" % i, "ts": t - 5000 + i} for i in range(1, 6)]
+        r = self.log(adds, now=t)
+        self.assertEqual(r["ids"], ["Q5", "Q4", "Q3"])                       # newest first, never oldest first
+        r = self.log(adds + [{"ev": "pending_add", "pid": "Q6", "text": "urgent", "top": True, "ts": t - 100}], now=t)
+        self.assertEqual((r["ids"], r["tops"]), (["Q6", "Q5", "Q4"], [True, False, False]))
+        r = self.log(adds + [{"ev": "pending_top", "pid": "Q1", "ts": t - 50}, {"ev": "pending_top", "pid": "Q2", "ts": t - 40}], now=t)
+        self.assertEqual(r["ids"], ["Q2", "Q1", "Q5"])                       # promoted later comes first among priority items
+    def test_q_tag_in_progress_then_done(self):
+        t = 1_800_000_000.0
+        base = [{"ev": "pending_add", "pid": "Q1", "text": "a", "ts": t - 900}, {"ev": "pending_add", "pid": "Q2", "text": "b", "ts": t - 800}]
+        run = base + [{"ev": "start", "id": "g1", "qid": "Q2", "ts": t - 300}]
+        r = self.log(run, now=t); self.assertEqual((r["ids"], r["queued"], r["in_progress"]), (["Q1"], 1, 1))
+        r = self.log(run + [{"ev": "finish", "id": "g1", "ts": t - 10}], now=t); self.assertEqual((r["ids"], r["queued"], r["in_progress"]), (["Q1"], 1, 0))
+        # the finish row alone (no qid on it) still closes the item: the start row carried the tag
+        r = self.log(base + [{"ev": "start", "id": "g2", "tuid": "tu", "qid": "Q1", "ts": t - 300}, {"ev": "finish", "id": "g2", "ts": t - 5}], now=t)
+        self.assertEqual(r["ids"], ["Q2"])
+        r = self.log(base + [{"ev": "start", "id": "gone", "qid": "Q1", "ts": t - 13 * 3600}], now=t)   # lost agent: the item is pending again
+        self.assertEqual((r["ids"], r["in_progress"]), (["Q2", "Q1"], 0))
+        self.assertEqual(self.log(base + [{"ev": "start", "id": "g3", "qid": "Q9", "ts": t - 5}], now=t)["in_progress"], 0)
+    def test_age_tag_after_24_hours(self):
+        t = 1_800_000_000.0
+        r = self.log([{"ev": "pending_add", "pid": "Q1", "text": "old", "ts": t - 30 * 3600}, {"ev": "pending_add", "pid": "Q2", "text": "newer", "ts": t - 100}], now=t)
+        self.assertEqual((r["ids"], r["aged"], r["ages"]), (["Q2", "Q1"], 1, [100, 30 * 3600]))
 
 if __name__ == "__main__":
     unittest.main()

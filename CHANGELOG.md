@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-05 (Next up stays current)
+- agentq: `queue add --top` and `queue top <id>` for priority items; pending items are listed priority first, then newest first (they used to be oldest first, so stale items sat on top).
+- Auto-close: an agent whose description or prompt contains `[Q14]` marks that item in progress when it starts (shown in `queue list` and the markdown view, out of Next up) and done when it finishes. A lost agent releases the item.
+- Fuzzy link: a finished agent whose description closely matches a pending item flags it `maybe done` in `queue list`, `queue status` and the view. Never auto-closed.
+- Age: items older than `AGENTQ_AGE_HOURS` (24) show their age; `queue status` and `queue json` (`aged`, `in_progress`, `maybe_done`, `next_up`) report counts.
+- `queue done` takes several ids: `queue done 3 5 7 "note"`.
+- Hangar Queue tab: Next up sorts the same way, shows a TOP marker, an amber age tag past 24 h (`HANGAR_QUEUE_AGE_HOURS`) and an "n in progress" count. `HANGAR_QUEUE_PARSE` adds `in_progress`, `aged`, `tops`, `ages`.
+- Tests: 8 new in `tests/test_agentq.py`, 3 new in `tests/test_hangar_queue.py`.
+
 ## 2026-11-05 (departments)
 - **Departments (roles)** in agentq: an agent's department comes from a `[dept:<Name>]` prefix on its description (stripped from the shown text) or from `AGENTQ_DEPT` in the hook's environment; `queue tag <R#|id> <dept>` tags one already running. `queue list` groups running agents by department, `queue list <dept>` filters, `queue depts` counts. A department with more than 10 running agents (`AGENTQ_SUPERVISOR_OVER`) is flagged **needs supervisor** in `queue status`, `queue depts`, `queue json` (`by_dept`, `needs_supervisor`) and the markdown view (Dept column, Departments table). Untagged setups look as before.
 - Hangar Queue tab: a Departments block (running agents per department, amber "needs supervisor" over `HANGAR_SUPERVISOR_OVER`), shown once any agent carries a department. `HANGAR_QUEUE_PARSE` adds `depts`, `needs_supervisor` and `running_top`. New screenshots `hangar_queue_depts_*.png`.

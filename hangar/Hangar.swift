@@ -134,9 +134,13 @@ let BUSINESS_HOURS: (Int, Int) = {
   let parts = (ENV["HANGAR_BUSINESS_HOURS"] ?? "8-18").split(separator: "-").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
   return parts.count == 2 ? (parts[0], parts[1]) : (8, 18)
 }()
-struct QItem: Identifiable { let id: String; let text: String }
+/// ageSecs > 0 only for pending items (shown as an amber tag once past QUEUE_AGE_SECS); top = a priority item.
+struct QItem: Identifiable { let id: String; let text: String; var top = false; var ageSecs = 0.0 }
+let QUEUE_AGE_SECS = (Double(ENV["HANGAR_QUEUE_AGE_HOURS"] ?? "") ?? 24) * 3600
+/// "26h" under two days, then "3d" (same as agentq's age tag).
+func queueAgeTag(_ secs: Double) -> String { let h = Int(secs / 3600); return h < 48 ? "\(h)h" : "\(h / 24)d" }
 struct QueueInfo {
-  var found = false, name = "", running = 0, finished = 0, queued = 0, top = [QItem](), mtime: Date? = nil, runningTop = [QItem](), depts = [DeptCount]()
+  var found = false, name = "", running = 0, finished = 0, queued = 0, top = [QItem](), mtime: Date? = nil, runningTop = [QItem](), depts = [DeptCount](), inProgress = 0, aged = 0
   var tagged: Bool { depts.contains { $0.name != NO_DEPT } }   // the department block shows only once agents carry a department
 }
 func queueStale(_ q: QueueInfo, now: Date = Date()) -> Bool {
@@ -176,7 +180,9 @@ func parseQueue(_ md: String) -> (running: Int, queued: [QItem], finished: Int) 
   return (running, queued, finished)
 }
 /// Folds the agentq event log (same rules as agentq.py): an agent is running when its latest start is newer than its latest finish and it
-/// started less than 12 h ago; tool_use ids alias to agent ids; pending items are pending_add minus pending_done.
+/// started less than 12 h ago; tool_use ids alias to agent ids; pending items are pending_add minus pending_done. Next up (Nov 5, 2026) is
+/// priority items first (pending_add with top, or pending_top), then NEWEST first; an agent carrying "qid" (a [Q14] tag) puts that item in
+/// progress while it runs (it leaves Next up) and closes it when it finishes; items older than QUEUE_AGE_SECS carry their age.
 func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
   var evs = [[String: Any]]()
   for raw in text.split(separator: "\n") {
@@ -184,8 +190,9 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
   }
   var alias = [String: String]()
   for e in evs { if let i = e["id"] as? String, let t = e["tuid"] as? String, !t.isEmpty, i != t { alias[t] = i } }
-  struct A { var start = Double.infinity, lastStart = 0.0, lastEnd = 0.0, desc = "", dept = "" }
-  var agents = [String: A](), order = [String](), pend = [(String, String)](), done = Set<String>(), newest = 0.0
+  struct A { var start = Double.infinity, lastStart = 0.0, lastEnd = 0.0, desc = "", dept = "", qid = "" }
+  struct P { let id: String; let text: String; let added: Double; var top = 0.0; var done = false; var started = false }
+  var agents = [String: A](), order = [String](), pend = [String: P](), done = Set<String>(), newest = 0.0
   for e in evs {
     let ts = (e["ts"] as? Double) ?? 0; newest = max(newest, ts)
     switch e["ev"] as? String ?? "" {
@@ -195,11 +202,13 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
       if agents[k] == nil { agents[k] = A(); order.append(k) }
       var a = agents[k]!
       if a.desc.isEmpty, let d = (e["desc"] as? String) ?? (e["prompt"] as? String) { let (pd, rest) = splitDept(d); a.desc = rest; if a.dept.isEmpty { a.dept = pd } }
+      if a.qid.isEmpty, let qd = e["qid"] as? String { a.qid = qd }
       if let d = e["dept"] as? String, !d.isEmpty, a.dept.isEmpty || (e["retag"] as? Bool ?? false) { a.dept = d }
       if (e["ev"] as? String) == "finish" { a.lastEnd = max(a.lastEnd, ts); if a.start == .infinity { a.start = ts } }
       else { a.start = min(a.start, ts); if (e["ev"] as? String) == "start" && e["via"] == nil { a.lastStart = max(a.lastStart, ts) } }   // a PostToolUse row (via: post) can land after the finish
       agents[k] = a
-    case "pending_add": if let p = e["pid"] as? String { pend.append((p, e["text"] as? String ?? "")) }
+    case "pending_add": if let p = e["pid"] as? String { pend[p] = P(id: p, text: e["text"] as? String ?? "", added: ts, top: (e["top"] as? Bool ?? false) ? ts : 0) }
+    case "pending_top": if let p = e["pid"] as? String, pend[p] != nil { pend[p]!.top = ts }
     case "pending_done": if let p = e["pid"] as? String { done.insert(p) }
     default: break
     }
@@ -209,15 +218,27 @@ func foldQueueLog(_ text: String, now: Date = Date()) -> QueueInfo {
   var perDept = [String: Int]()
   for k in order {
     let a = agents[k]!
-    if a.lastEnd > 0 && a.lastEnd >= a.lastStart {
+    let finishedIt = a.lastEnd > 0 && a.lastEnd >= a.lastStart
+    if !a.qid.isEmpty, var p = pend[a.qid], !p.done, !done.contains(a.qid) {   // the [Q14] link
+      if finishedIt, a.lastEnd >= p.added { p.done = true } else if !finishedIt, t - a.start <= QUEUE_LOST_SECS { p.started = true }
+      pend[a.qid] = p
+    }
+    if finishedIt {
       if cal.isDate(Date(timeIntervalSince1970: a.lastEnd), inSameDayAs: now) { q.finished += 1 }
     } else if t - a.start <= QUEUE_LOST_SECS {
       q.running += 1; q.runningTop.append(QItem(id: "R\(q.running)", text: a.desc.isEmpty ? k : a.desc))
       perDept[a.dept.isEmpty ? NO_DEPT : a.dept, default: 0] += 1
     }
   }
-  let open = pend.filter { !done.contains($0.0) }.map { QItem(id: $0.0, text: $0.1) }
-  q.queued = open.count; q.top = Array(open.prefix(3))
+  func num(_ id: String) -> Int { Int(id.filter { $0.isNumber }) ?? 0 }
+  let live = pend.values.filter { !$0.done && !done.contains($0.id) }
+  q.inProgress = live.filter { $0.started }.count
+  let open = live.filter { !$0.started }.sorted { a, b in
+    if (a.top > 0) != (b.top > 0) { return a.top > 0 }
+    return a.top > 0 ? (a.top, num(a.id)) > (b.top, num(b.id)) : num(a.id) > num(b.id)
+  }
+  q.queued = open.count; q.aged = open.filter { t - $0.added > QUEUE_AGE_SECS }.count
+  q.top = open.prefix(3).map { QItem(id: $0.id, text: $0.text, top: $0.top > 0, ageSecs: max(0, t - $0.added)) }
   q.depts = perDept.map { DeptCount(name: $0.key, running: $0.value) }
     .sorted { ($0.name == NO_DEPT ? 1 : 0, -$0.running, $0.name) < ($1.name == NO_DEPT ? 1 : 0, -$1.running, $1.name) }
   q.mtime = newest > 0 ? Date(timeIntervalSince1970: newest) : nil
@@ -1011,11 +1032,22 @@ struct PanelView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.2)))
       }
       VStack(alignment: .leading, spacing: 5) {
-        Text(q.top.isEmpty ? (q.found ? "Nothing pending" : "No queue found") : "Next up").font(.system(size: 11.5, weight: .semibold))
+        HStack(spacing: 6) {
+          Text(q.top.isEmpty ? (q.found ? "Nothing pending" : "No queue found") : "Next up").font(.system(size: 11.5, weight: .semibold))
+          Spacer(minLength: 4)
+          if q.inProgress > 0 { Text("\(q.inProgress) in progress").font(.system(size: 10)).foregroundStyle(.secondary) }
+          if q.aged > 0 { Text("\(q.aged) over \(queueAgeTag(QUEUE_AGE_SECS))").font(.system(size: 10, weight: .semibold)).foregroundStyle(AMBER) }
+        }
         ForEach(q.top) { it in
           HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(it.id).font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(.blue).frame(width: 28, alignment: .leading)
+            if it.top { Text("TOP").font(.system(size: 8.5, weight: .bold)).foregroundStyle(.blue) }
             Text(it.text).font(.system(size: 11)).lineLimit(2).truncationMode(.tail).fixedSize(horizontal: false, vertical: true)
+            if it.ageSecs > QUEUE_AGE_SECS {   // older than a day: say how old instead of presenting it as fresh
+              Spacer(minLength: 2)
+              Text(queueAgeTag(it.ageSecs)).font(.system(size: 9.5, weight: .semibold, design: .rounded)).foregroundStyle(AMBER)
+                .padding(.horizontal, 5).padding(.vertical, 1).background(Capsule().fill(AMBER.opacity(0.16))).overlay(Capsule().stroke(AMBER.opacity(0.6)))
+            }
           }
         }
       }
@@ -1257,6 +1289,7 @@ if let f = ENV["HANGAR_QUEUE_PARSE"] {
   if f.hasSuffix(".jsonl") {
     let q = foldQueueLog(text, now: now)
     j = ["running": q.running, "finished": q.finished, "queued": q.queued, "ids": q.top.map { $0.id }, "top": q.top.map { $0.text },
+         "in_progress": q.inProgress, "aged": q.aged, "tops": q.top.map { $0.top }, "ages": q.top.map { Int($0.ageSecs) },
          "newest": q.mtime?.timeIntervalSince1970 ?? 0, "stale": queueStale(q, now: now),
          "depts": Dictionary(uniqueKeysWithValues: q.depts.map { ($0.name, $0.running) }), "needs_supervisor": q.depts.filter { $0.needsSupervisor }.map { $0.name },
          "running_top": q.runningTop.map { $0.text }]

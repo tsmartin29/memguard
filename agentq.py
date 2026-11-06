@@ -6,8 +6,9 @@ write every agent start and finish to an append-only log, and the markdown view 
 
   agentq hook                       hook mode: reads one Claude Code hook payload (JSON) on stdin. Never blocks, always exits 0.
                                     PostToolUse (Agent/Task) and SubagentStart -> STARTED, SubagentStop -> FINISHED.
-  agentq add "<task>"               add a PENDING item (the backlog); prints its id (Q1, Q2, ...)
-  agentq done <id> [note]           mark a PENDING item done (Q3 or 3)
+  agentq add [--top] "<task>"       add a PENDING item (the backlog); prints its id (Q1, Q2, ...); --top makes it priority
+  agentq top <id> [id ...]          promote pending items to priority (Q3 or 3)
+  agentq done <id> [id ...] [note]  mark PENDING items done (Q3 or 3); several ids at once, the first non-id word starts the note
   agentq status                     running / finished today / pending counts, newest entry age, STALE flag
   agentq list [dept]                status plus the running agents (grouped by department) and the pending items; a dept name filters
   agentq depts                      running agents per department; "needs supervisor" when one has more than 10
@@ -17,19 +18,26 @@ write every agent start and finish to an append-only log, and the markdown view 
                                     reconstruct agents from Claude Code subagent transcripts (agent-*.meta.json + .jsonl) for one day
                                     (default today); skips agents already in the log
 
+Keeping "Next up" current (Nov 5, 2026): nobody has to close items by hand any more.
+  order     priority items first, then NEWEST first (never oldest first), everywhere the backlog is shown.
+  [Q14]     an agent whose description or prompt contains [Q14] marks pending item Q14 "in progress" when it starts (it leaves the
+            pending list) and done when it finishes. A lost agent (no finish after AGENTQ_LOST_HOURS) releases the item again.
+  maybe     a finished agent whose description closely matches a pending item flags it "maybe done" in `list` (never auto-closed).
+  age       pending items older than AGENTQ_AGE_HOURS (24) show their age; `status` reports how many.
+
 Files (AGENTQ_DIR, default ~/.config/memguard/queue):
-  agents.jsonl       the log, one JSON event per line: start / info / finish / pending_add / pending_done
+  agents.jsonl       the log, one JSON event per line: start / info / finish / pending_add / pending_top / pending_done
   hook_errors.log    anything the hook could not do (the hook itself never fails the tool call)
   AGENT_QUEUE_<date>.md   generated view, written to AGENTQ_MD_DIR (default AGENTQ_DIR). Do not edit it: use add / done.
 Settings: AGENTQ_STALE_HOURS (2), AGENTQ_BUSINESS_HOURS ("8-18", local clock; STALE is only raised inside these hours),
-AGENTQ_LOST_HOURS (12: an agent with no finish after this long counts as lost, not running).
+AGENTQ_LOST_HOURS (12: an agent with no finish after this long counts as lost, not running), AGENTQ_AGE_HOURS (24).
 
 Departments (optional, Nov 5, 2026: agents are grouped by function under a department head): an agent's department comes from a
 "[dept:Name]" prefix on its description (stripped from the shown text), else from AGENTQ_DEPT in the hook's environment (set it when
 you start a head's session and every agent that session spawns is tagged). Agents with neither are "Unassigned". A department with
 more than AGENTQ_SUPERVISOR_OVER (10) running agents is flagged "needs supervisor": its head may spawn a supervisor agent.
 """
-import calendar, fcntl, glob, json, os, re, sys, time
+import calendar, difflib, fcntl, glob, json, os, re, sys, time
 
 DIR = os.path.expanduser(os.environ.get("AGENTQ_DIR") or "~/.config/memguard/queue")
 MD_DIR = os.path.expanduser(os.environ.get("AGENTQ_MD_DIR") or DIR)
@@ -45,6 +53,7 @@ def fenv(name, dflt):
 
 STALE_H = fenv("AGENTQ_STALE_HOURS", 2)
 LOST_H = fenv("AGENTQ_LOST_HOURS", 12)
+AGE_H = fenv("AGENTQ_AGE_HOURS", 24)
 SUP_OVER = int(fenv("AGENTQ_SUPERVISOR_OVER", 10))
 NO_DEPT = "Unassigned"
 DEPT_RE = re.compile(r"^\s*\[\s*dept\s*:\s*([^\]\n]{1,60})\]\s*", re.I)
@@ -59,6 +68,19 @@ def split_dept(text):
     m = DEPT_RE.match(text)
     if not m: return "", text
     return clean_dept(m.group(1)), text[m.end():]
+
+QTAG_RE = re.compile(r"\[\s*Q(\d+)\s*\]", re.I)
+
+def find_qid(*texts):
+    """First '[Q14]' tag in the given texts -> 'Q14' ('' when none)."""
+    for t in texts:
+        m = QTAG_RE.search(str(t or ""))
+        if m: return "Q%d" % int(m.group(1))
+    return ""
+
+def age_text(secs):
+    h = int(secs // 3600)
+    return "%dh" % h if h < 48 else "%dd" % (h // 24)
 
 def env_dept(): return clean_dept(os.environ.get("AGENTQ_DEPT", ""))
 
@@ -129,7 +151,7 @@ def fold(events, now=None):
             if not k: continue
             k = alias.get(k, k)
             a = agents.setdefault(k, {"id": k, "start": None, "end": None, "last_start": 0.0, "last_end": 0.0})
-            for f in ("desc", "model", "type", "prompt", "session", "proj", "src", "dept"):
+            for f in ("desc", "model", "type", "prompt", "session", "proj", "src", "dept", "qid"):
                 if e.get(f) and not a.get(f): a[f] = e[f]
             if e.get("retag") and e.get("dept"): a["dept"] = e["dept"]   # `agentq tag` overrides the first tag
             if ev in ("start", "info"):
@@ -140,7 +162,10 @@ def fold(events, now=None):
                 r = e.get("result") or ""
                 if r and not a.get("result") and not r.startswith("This agent's report was delivered"): a["result"] = r   # the agent's own last message wins
         elif ev == "pending_add" and e.get("pid"):
-            pend[e["pid"]] = {"pid": e["pid"], "text": e.get("text", ""), "added": ts, "done": None, "note": ""}
+            pend[e["pid"]] = {"pid": e["pid"], "text": e.get("text", ""), "added": ts, "done": None, "note": "",
+                              "top": ts if e.get("top") else 0.0, "started": None, "maybe": ""}
+        elif ev == "pending_top" and e.get("pid") in pend:
+            pend[e["pid"]]["top"] = ts
         elif ev == "pending_done" and e.get("pid") in pend:
             pend[e["pid"]].update(done=ts, note=e.get("note", ""))
     out = []
@@ -151,7 +176,33 @@ def fold(events, now=None):
         else: a["status"] = "running"
         out.append(a)
     out.sort(key=lambda a: a["start"])
+    for a in out:   # [Q14] link: a running agent starts the item, a finished one closes it; a lost one releases it
+        p = pend.get(a.get("qid", ""))
+        if not p or p["done"]: continue
+        if a["status"] == "finished" and a["end"] >= p["added"]: p.update(done=a["end"], note="auto: agent finished (%s)" % one_line(a.get("desc") or a["id"], 60))
+        elif a["status"] == "running": p["started"] = max(p["started"] or 0, a["start"])
     return out, sorted(pend.values(), key=lambda p: int(re.sub(r"\D", "", p["pid"]) or 0)), newest
+
+def pend_order(p):
+    """Priority items first (most recently promoted first), then NEWEST first. Never oldest first."""
+    n = int(re.sub(r"\D", "", p["pid"]) or 0)
+    return (0, -p["top"], -n) if p["top"] else (1, 0, -n)
+
+WORDS_SKIP = set("the and for with from into that this are was our all not you your its has have will new add run per out off but can".split())
+def tokens(s): return {w for w in re.findall(r"[a-z0-9]+", str(s or "").lower()) if len(w) > 2 and w not in WORDS_SKIP}
+
+def close_match(task, desc):
+    """A finished agent's description closely matches a pending item: most of the shorter one's words are shared (and at least two), or the strings are alike."""
+    a, b = tokens(task), tokens(desc)
+    if len(a & b) >= 2 and len(a & b) / min(len(a), len(b)) >= 0.6: return True
+    return difflib.SequenceMatcher(None, str(task).lower(), str(desc).lower()).ratio() >= 0.6
+
+def flag_maybe(queued, agents):
+    for p in queued:
+        for a in reversed(agents):   # newest agent first
+            d = a.get("desc")
+            if a["status"] == "finished" and d and a["end"] >= p["added"] and a.get("qid") != p["pid"] and close_match(p["text"], d):
+                p["maybe"] = one_line(d, 60); break
 
 def summary(now=None):
     now = now or time.time()
@@ -160,17 +211,23 @@ def summary(now=None):
     run = [a for a in agents if a["status"] == "running"]
     fin = [a for a in agents if a["status"] == "finished" and day(a["end"]) == today]
     lost = [a for a in agents if a["status"] == "lost" and day(a["start"]) == today]
-    openp = [p for p in pend if not p["done"]]
+    openp = [p for p in pend if not p["done"] and not p["started"]]
+    prog = [p for p in pend if not p["done"] and p["started"]]
+    openp.sort(key=pend_order); prog.sort(key=lambda p: -p["started"])
+    flag_maybe(openp, agents)
+    for p in openp: p["age"] = now - p["added"]
+    aged = [p for p in openp if p["age"] > AGE_H * 3600]
     by_dept = {}
     for a in run: by_dept[a.get("dept") or NO_DEPT] = by_dept.get(a.get("dept") or NO_DEPT, 0) + 1
     lo, hi = business_hours()
     hour = time.localtime(now).tm_hour
     age = now - newest if newest else None
     stale = (age is None or age > STALE_H * 3600) and lo <= hour < hi
-    return {"running": len(run), "finished_today": len(fin), "lost_today": len(lost), "pending": len(openp),
+    return {"running": len(run), "finished_today": len(fin), "lost_today": len(lost), "pending": len(openp), "in_progress": len(prog), "aged": len(aged), "maybe_done": len([p for p in openp if p["maybe"]]),
+            "next_up": [p["pid"] for p in openp[:3]],
             "newest": newest or None, "age_min": None if age is None else int(age // 60), "stale": stale,
             "by_dept": by_dept, "needs_supervisor": sorted(d for d, n in by_dept.items() if n > SUP_OVER and d != NO_DEPT),
-            "_run": run, "_fin": fin, "_lost": lost, "_pend": openp, "_agents": agents, "_allpend": pend}
+            "_run": run, "_fin": fin, "_lost": lost, "_pend": openp, "_prog": prog, "_agents": agents, "_allpend": pend}
 
 
 # ---------------------------------------------------------------- markdown view
@@ -201,9 +258,12 @@ def render(date=None):
         L += ["", "## Departments (running agents)", "", "| Dept | Running | Note |", "|---|---|---|"]
         for d, n in sorted(s["by_dept"].items(), key=lambda kv: (kv[0] == NO_DEPT, -kv[1], kv[0])):
             L.append("| %s | %d | %s |" % (cell(d), n, "needs supervisor (over %d)" % SUP_OVER if d in s["needs_supervisor"] else ""))
-    L += ["", "## PENDING (queued, top first) (%d)" % len(s["_pend"]), "", "| # | Task | Added |", "|---|---|---|"]
+    if s["_prog"]:
+        L += ["", "## IN PROGRESS (an agent tagged [Qn] is working on it) (%d)" % len(s["_prog"]), "", "| # | Task | Since |", "|---|---|---|"]
+        for p in s["_prog"]: L.append("| %s | %s | %s |" % (p["pid"], cell(p["text"]), hm(p["started"])))
+    L += ["", "## PENDING (queued, priority first, then newest first) (%d)" % len(s["_pend"]), "", "| # | Task | Added | Flags |", "|---|---|---|---|"]
     for p in s["_pend"]:
-        L.append("| %s | %s | %s |" % (p["pid"], cell(p["text"]), time.strftime("%b %-d %-I:%M %p", time.localtime(p["added"]))))
+        L.append("| %s | %s | %s | %s |" % (p["pid"], cell(p["text"]), time.strftime("%b %-d %-I:%M %p", time.localtime(p["added"])), "; ".join(flags(p))))
     L += ["", "## Finished (%d)" % len(fin), "", "| # | Job | Started | Finished | Model | Result | Dept |", "|---|---|---|---|---|---|---|"]
     for i, a in enumerate(fin, 1):
         L.append("| F%d | %s | %s | %s | %s | %s | %s |" % (i, cell(a.get("desc") or a.get("prompt") or a["id"]), hm(a["start"]), hm(a["end"]),
@@ -261,6 +321,7 @@ def hook_events(p):
         dept, desc = split_dept(ti.get("description"))
         if not dept: dept = split_dept(ti.get("prompt"))[0] or env_dept()
         e = dict(base, ev="start", via="post", id=m.group(1) if m else tuid, tuid=tuid, desc=one_line(desc, 120), dept=dept,
+                 qid=find_qid(ti.get("description"), ti.get("prompt")),
                  model=ti.get("model") or "", type=ti.get("subagent_type") or "general-purpose", prompt=one_line(ti.get("prompt"), 160),
                  bg=bool(ti.get("run_in_background", True)))
         e = {k: v for k, v in e.items() if v not in ("", None)}
@@ -274,7 +335,7 @@ def hook_events(p):
         md = meta_for(p.get("transcript_path"), sid, aid)
         dept, desc = split_dept(md.get("description"))
         e = dict(base, ev="start", id=aid, tuid=md.get("toolUseId", ""), type=p.get("agent_type") or md.get("agentType", ""),
-                 desc=one_line(desc, 120), model=md.get("model", ""), dept=dept or env_dept())
+                 desc=one_line(desc, 120), model=md.get("model", ""), dept=dept or env_dept(), qid=find_qid(md.get("description")))
         return [{k: v for k, v in e.items() if v not in ("", None)}]
     if ev == "SubagentStop":
         aid = p.get("agent_id") or ""
@@ -282,7 +343,7 @@ def hook_events(p):
         md = meta_for(p.get("agent_transcript_path") or p.get("transcript_path"), sid, aid)
         dept, desc = split_dept(md.get("description"))
         e = dict(base, ev="finish", id=aid, tuid=md.get("toolUseId", ""), type=p.get("agent_type") or md.get("agentType", ""),
-                 desc=one_line(desc, 120), dept=dept or env_dept(), model=md.get("model", ""), result=one_line(p.get("last_assistant_message"), 160))
+                 desc=one_line(desc, 120), dept=dept or env_dept(), model=md.get("model", ""), qid=find_qid(md.get("description")), result=one_line(p.get("last_assistant_message"), 160))
         return [{k: v for k, v in e.items() if v not in ("", None)}]
     return []
 
@@ -339,7 +400,8 @@ def backfill(sub_dir, date=None):
         done = handback or msg.get("stop_reason") == "end_turn" or now - os.path.getmtime(tp) > 15 * 60
         dept, desc = split_dept(md.get("description"))
         base = {"id": aid, "tuid": md.get("toolUseId", ""), "desc": one_line(desc, 120), "dept": dept, "model": md.get("model", ""),
-                "type": md.get("agentType", ""), "prompt": one_line(prompt, 160), "src": "backfill"}
+                "type": md.get("agentType", ""), "prompt": one_line(prompt, 160), "src": "backfill",
+                "qid": find_qid(md.get("description"), prompt)}
         base = {k: v for k, v in base.items() if v}
         new.append(dict(base, ev="start", ts=t0))
         if done: new.append(dict(base, ev="finish", ts=t1, result=one_line(result, 160)))
@@ -355,8 +417,10 @@ def next_pid(events):
 
 def status_line(s):
     age = "no entries yet" if s["age_min"] is None else ("newest entry %d min ago" % s["age_min"])
-    return "%d running, %d finished today, %d pending; %s%s%s" % (
-        s["running"], s["finished_today"], s["pending"], age, "; %d lost" % s["lost_today"] if s["lost_today"] else "",
+    return "%d running, %d finished today, %d pending%s; %s%s%s%s%s" % (
+        s["running"], s["finished_today"], s["pending"], ", %d in progress" % s["in_progress"] if s["in_progress"] else "", age,
+        "; %d pending older than %g h" % (s["aged"], AGE_H) if s["aged"] else "",
+        "; %d maybe done" % s["maybe_done"] if s["maybe_done"] else "", "; %d lost" % s["lost_today"] if s["lost_today"] else "",
         "; STALE (nothing for over %g h in business hours)" % STALE_H if s["stale"] else "") + \
         ("; needs supervisor: %s" % ", ".join(s["needs_supervisor"]) if s["needs_supervisor"] else "")
 
@@ -383,30 +447,59 @@ def list_lines(s, only=""):
             n += 1; out.append("%sR%d  %s  (%s, %s)" % ("    " if not flat else "  ", n, a.get("desc") or a["id"], hm(a["start"]), a.get("model", "")))
     if only and not out: out.append("  no running agents in %s" % only.strip())
     if not only:
-        for p in s["_pend"]: out.append("  %s  %s" % (p["pid"], p["text"]))
+        for p in s["_prog"]: out.append("  %s  %s  (in progress)" % (p["pid"], p["text"]))
+        for p in s["_pend"]: out.append("  %s  %s%s" % (p["pid"], p["text"], "  [%s]" % "; ".join(flags(p)) if flags(p) else ""))
     return out
+
+def flags(p):
+    """Short tags for a queued item: priority, 'maybe done: <agent>', and its age once past AGENTQ_AGE_HOURS."""
+    out = []
+    if p["top"]: out.append("top")
+    if p.get("maybe"): out.append("maybe done: %s" % p["maybe"])
+    if p.get("age", 0) > AGE_H * 3600: out.append("%s old" % age_text(p["age"]))
+    return out
+
+def parse_ids(args):
+    """['Q1', '2', 'shipped', 'it'] -> (['Q1', 'Q2'], ['shipped', 'it']): leading Q<n> / <n> words are ids, the rest is the note."""
+    ids = []
+    for i, a in enumerate(args):
+        if not re.fullmatch(r"[Qq]?\d+", a): return ids, args[i:]
+        ids.append("Q%d" % int(a.lstrip("Qq")))
+    return ids, []
 
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "status"
     if cmd == "hook": return hook()
     if cmd == "add":
-        text = " ".join(argv[2:]).strip()
-        if not text: print("usage: queue add \"<task>\""); return 2
+        top = len(argv) > 2 and argv[2] == "--top"
+        text = " ".join(argv[3 if top else 2:]).strip()
+        if not text: print("usage: queue add [--top] \"<task>\""); return 2
         with Locked():
             pid = next_pid(read_events())
-            with open(LOG, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"ev": "pending_add", "pid": pid, "text": text, "ts": time.time()}, ensure_ascii=False, sort_keys=True) + "\n")
+            ev = {"ev": "pending_add", "pid": pid, "text": text, "ts": time.time()}
+            if top: ev["top"] = True
+            with open(LOG, "a", encoding="utf-8") as fh: fh.write(json.dumps(ev, ensure_ascii=False, sort_keys=True) + "\n")
             render()
-        print("%s added: %s" % (pid, text)); return 0
+        print("%s added%s: %s" % (pid, " (top)" if top else "", text)); return 0
+    if cmd == "top":
+        ids, _ = parse_ids(argv[2:])
+        if not ids: print("usage: queue top <id> [id ...]"); return 2
+        _, pend, _ = fold(read_events()); by = {p["pid"]: p for p in pend}; rc, evs = 0, []
+        for pid in ids:
+            if pid not in by or by[pid]["done"]: print("no pending item %s" % pid); rc = 1
+            else: evs.append({"ev": "pending_top", "pid": pid}); print("%s is now top: %s" % (pid, by[pid]["text"]))
+        if evs: append(evs)
+        return rc
     if cmd == "done":
-        if len(argv) < 3: print("usage: queue done <id> [note]"); return 2
-        pid = argv[2].upper(); pid = pid if pid.startswith("Q") else "Q" + pid
-        _, pend, _ = fold(read_events())
-        hit = [p for p in pend if p["pid"] == pid]
-        if not hit: print("no pending item %s" % pid); return 1
-        if hit[0]["done"]: print("%s was already done" % pid); return 0
-        append([{"ev": "pending_done", "pid": pid, "note": " ".join(argv[3:])}])
-        print("%s done: %s" % (pid, hit[0]["text"])); return 0
+        ids, note = parse_ids(argv[2:])
+        if not ids: print("usage: queue done <id> [id ...] [note]"); return 2
+        _, pend, _ = fold(read_events()); by = {p["pid"]: p for p in pend}; rc, evs = 0, []
+        for pid in dict.fromkeys(ids):
+            if pid not in by: print("no pending item %s" % pid); rc = 1
+            elif by[pid]["done"]: print("%s was already done" % pid)
+            else: evs.append({"ev": "pending_done", "pid": pid, "note": " ".join(note)}); print("%s done: %s" % (pid, by[pid]["text"]))
+        if evs: append(evs)
+        return rc
     if cmd == "render":
         with Locked(): print(render(argv[2] if len(argv) > 2 else None)); return 0
     if cmd == "backfill":

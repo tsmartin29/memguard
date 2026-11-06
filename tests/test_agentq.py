@@ -154,5 +154,80 @@ class AgentQ(unittest.TestCase):
         self.assertEqual(self.run_aq("tag", "R9", "QA")[0], 1)
         self.assertEqual(self.run_aq("tag", "R1")[0], 2)
 
+    # Next up stays current (Nov 5, 2026)
+    def nextup(self): return self.state()["next_up"]
+    def test_next_up_newest_first_and_priority(self):
+        for t in ("one", "two", "three", "four"): self.run_aq("add", t)
+        self.assertEqual(self.nextup(), ["Q4", "Q3", "Q2"])                  # newest first, never oldest first
+        out = self.run_aq("add", "--top", "urgent job")[1]; self.assertIn("Q5 added (top): urgent job", out)
+        self.assertEqual(self.nextup(), ["Q5", "Q4", "Q3"])                  # priority first
+        rc, msg = self.run_aq("top", "1"); self.assertEqual(rc, 0)
+        self.assertEqual(self.nextup(), ["Q1", "Q5", "Q4"])                  # promoted later = first among the priority items
+        self.assertEqual(self.run_aq("top", "Q9")[0], 1); self.assertEqual(self.run_aq("top")[0], 2)
+        lst = self.run_aq("list")[1]; self.assertIn("Q1  one  [top]", lst); self.assertLess(lst.index("Q1  one"), lst.index("Q4  four"))
+        md = self.md(); self.assertLess(md.index("| Q1 |"), md.index("| Q4 |")); self.assertLess(md.index("| Q4 |"), md.index("| Q2 |"))
+    def test_q_tag_starts_then_closes_item(self):
+        self.run_aq("add", "Fix the diagram"); self.run_aq("add", "Other task")
+        self.start("q1agent1", "Fix diagram [Q1]")
+        s = self.state(); self.assertEqual((s["pending"], s["in_progress"], s["next_up"]), (1, 1, ["Q2"]))   # leaves Next up while running
+        out = self.run_aq("list")[1]; self.assertIn("Q1  Fix the diagram  (in progress)", out); self.assertIn("1 in progress", self.run_aq("status")[1])
+        self.assertIn("## IN PROGRESS", self.md())
+        self.hook({"hook_event_name": "SubagentStop", "agent_id": "q1agent1", "last_assistant_message": "done"})
+        s = self.state(); self.assertEqual((s["pending"], s["in_progress"]), (1, 0))
+        md = self.md(); self.assertIn("~~Q1~~", md); self.assertIn("auto: agent finished", md)
+        self.assertEqual(self.run_aq("done", "1")[1].strip(), "Q1 was already done")
+    def test_q_tag_in_prompt_and_foreground(self):
+        self.run_aq("add", "alpha"); self.run_aq("add", "beta")
+        self.hook({"hook_event_name": "PostToolUse", "tool_name": "Agent", "tool_use_id": "tp1", "tool_input": {"description": "work", "prompt": "Do the thing.\nTask [q2] from the queue"},
+                   "tool_response": "Async agent launched. agentId: pr000001"})
+        self.assertEqual(self.state()["in_progress"], 1)
+        # SubagentStop only knows the description: the tag was in the prompt, the tool_use id links the two
+        sub = os.path.join(self.d, "s", "subagents"); os.makedirs(sub)
+        with open(os.path.join(sub, "agent-pr000001.meta.json"), "w") as fh: json.dump({"toolUseId": "tp1", "description": "work"}, fh)
+        tp = os.path.join(sub, "agent-pr000001.jsonl"); open(tp, "w").close()
+        self.hook({"hook_event_name": "SubagentStop", "agent_id": "pr000001", "agent_transcript_path": tp})
+        s = self.state(); self.assertEqual((s["pending"], s["in_progress"]), (1, 0)); self.assertEqual(s["next_up"], ["Q1"])
+        self.hook({"hook_event_name": "PostToolUse", "tool_name": "Task", "tool_use_id": "tp2", "tool_input": {"description": "quick [Q1]"},
+                   "tool_response": {"content": [{"type": "text", "text": "OK"}]}})   # a foreground agent starts and finishes at once
+        self.assertEqual(self.state()["pending"], 0)
+    def test_q_tag_unknown_item_ignored_and_lost_agent_releases(self):
+        self.start("ghost001", "Task [Q99]"); self.assertEqual(self.state()["in_progress"], 0)
+        self.run_aq("add", "real")
+        with open(os.path.join(self.d, "agents.jsonl"), "a") as fh:
+            fh.write(json.dumps({"ev": "start", "id": "lost0001", "qid": "Q1", "ts": time.time() - 13 * 3600}) + "\n")
+        self.assertEqual((self.state()["pending"], self.state()["in_progress"]), (1, 0))   # lost after 12 h: back in Next up
+    def test_maybe_done_flag_not_auto_closed(self):
+        self.run_aq("add", "Rebuild the one-pagers for the Villanova pitch"); self.run_aq("add", "Unrelated bench test")
+        self.start("fz000001", "Rebuild one-pagers for Villanova"); self.start("fz000002", "Weekly tidy")
+        self.assertEqual(self.state()["maybe_done"], 0)                      # still running: not a candidate yet
+        self.hook({"hook_event_name": "SubagentStop", "agent_id": "fz000001", "last_assistant_message": "ok"})
+        self.hook({"hook_event_name": "SubagentStop", "agent_id": "fz000002", "last_assistant_message": "ok"})
+        s = self.state(); self.assertEqual((s["maybe_done"], s["pending"]), (1, 2))                  # flagged, not closed
+        out = self.run_aq("list")[1]; self.assertIn("Rebuild the one-pagers for the Villanova pitch  [maybe done: Rebuild one-pagers for Villanova]", out)
+        self.assertNotIn("Unrelated bench test  [", out); self.assertIn("1 maybe done", self.run_aq("status")[1])
+        self.assertIn("maybe done: Rebuild", self.md())
+        self.run_aq("done", "1"); self.assertEqual(self.state()["maybe_done"], 0)
+    def test_maybe_ignores_agents_finished_before_the_item_existed(self):
+        self.start("old00001", "Rebuild the one-pagers"); self.hook({"hook_event_name": "SubagentStop", "agent_id": "old00001"})
+        time.sleep(0.05); self.run_aq("add", "Rebuild the one-pagers")
+        self.assertEqual(self.state()["maybe_done"], 0)
+    def test_age_over_24h(self):
+        with open(os.path.join(self.d, "agents.jsonl"), "w") as fh:
+            fh.write(json.dumps({"ev": "pending_add", "pid": "Q1", "text": "ancient", "ts": time.time() - 30 * 3600}) + "\n")
+            fh.write(json.dumps({"ev": "pending_add", "pid": "Q2", "text": "ages", "ts": time.time() - 5 * 86400}) + "\n")
+            fh.write(json.dumps({"ev": "pending_add", "pid": "Q3", "text": "fresh", "ts": time.time() - 3600}) + "\n")
+        s = self.state(); self.assertEqual(s["aged"], 2)
+        self.assertIn("2 pending older than 24 h", self.run_aq("status")[1])
+        out = self.run_aq("list")[1]; self.assertIn("Q1  ancient  [30h old]", out); self.assertIn("Q2  ages  [5d old]", out); self.assertIn("Q3  fresh\n", out)
+        self.env["AGENTQ_AGE_HOURS"] = "48"; self.assertEqual(self.state()["aged"], 1)
+    def test_done_several_ids(self):
+        for t in "abcd": self.run_aq("add", t)
+        rc, out = self.run_aq("done", "1", "Q2", "4", "shipped", "today"); self.assertEqual(rc, 0)
+        self.assertEqual(out.count(" done: "), 3); self.assertEqual(self.state()["next_up"], ["Q3"])
+        self.assertIn("shipped today", self.md())
+        rc, out = self.run_aq("done", "3", "Q9"); self.assertEqual(rc, 1); self.assertIn("no pending item Q9", out)   # the valid one still closes
+        self.assertEqual(self.state()["pending"], 0)
+        self.assertEqual(self.run_aq("done")[0], 2); self.assertEqual(self.run_aq("done", "note")[0], 2)
+
 if __name__ == "__main__":
     unittest.main()
