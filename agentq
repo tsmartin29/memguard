@@ -1,6 +1,8 @@
 #!/bin/bash
-# queue add [--top] "<task>" | top <id> | done <id> [id ...] | status | list | render | backfill <dir> | hook   (see agentq.py)
+# queue add [--top] "<task>" | top <id> | done <id> [id ...] | status | list | board | collisions | idea "<text>" | ideas [--top] | adopt <id> | park <id> | promote <agent> <role> | render | backfill <dir> | hook   (see agentq.py)
 # Claude Code hooks call `agentq hook`; it never blocks a tool call. Data: $AGENTQ_DIR/agents.jsonl (default ~/.config/memguard/queue).
 export AGENTQ_DIR="${AGENTQ_DIR:-$HOME/.config/memguard/queue}"
 export AGENTQ_MD_DIR="${AGENTQ_MD_DIR:-$AGENTQ_DIR}"
-exec /usr/bin/python3 -I "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/agentq.py" "$@"
+# Imported, not run as a script, so Python uses the cached bytecode: this runs on every Edit and a 50 KB script recompiles each time (30 ms).
+HERE="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
+exec /usr/bin/python3 -I -S -c 'import sys; sys.path.insert(0, sys.argv[1]); del sys.argv[1]; import agentq; sys.exit(agentq.main(sys.argv))' "$HERE" "$@"
