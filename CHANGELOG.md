@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-05 (work board and ideas)
+- **Work board** in agentq: a `PostToolUse` hook on `Edit`/`Write`/`MultiEdit`/`NotebookEdit` logs agent + repo-relative file to `touches.jsonl` (append-only, deduped, no lock). Linked worktrees count as one repo.
+- **Collision warning**: an agent entering a file another running agent touched in the last 2 h gets `additionalContext` naming who and what they are doing; the overlap is logged. Warn-only, never blocks.
+- `SessionStart` and `SubagentStart` give a waking agent the board for its repo in under 30 lines.
+- New commands: `queue board [repo]`, `queue collisions [--all]`, `queue idea`, `queue ideas [--top] [--new|--adopted|--parked] [dept]`, `queue adopt`, `queue park`, `queue promote <agent> <role>`. A `Bash` hook fills in the idea's author. `queue status` and `queue json` report overlaps and new ideas.
+- Hook about 30% faster (120 ms to 85 ms): `calendar`, `difflib` and `glob` load only when used, and the wrapper imports agentq so Python uses cached bytecode.
+- Hangar Queue tab: file overlap count and a star for promoted agents. `HANGAR_QUEUE_PARSE` adds `collisions` and `promoted`.
+- RULES.md rule 16. Tests: 44 in `tests/test_agentboard.py`, 3 new in `tests/test_hangar_queue.py`.
+
 ## 2026-11-05 (Next up stays current)
 - agentq: `queue add --top` and `queue top <id>` for priority items; pending items are listed priority first, then newest first (they used to be oldest first, so stale items sat on top).
 - Auto-close: an agent whose description or prompt contains `[Q14]` marks that item in progress when it starts (shown in `queue list` and the markdown view, out of Next up) and done when it finishes. A lost agent releases the item.

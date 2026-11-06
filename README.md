@@ -17,7 +17,7 @@ Run 20-30 Claude Code sessions on a 24 GB laptop and sooner or later two of them
 | `afterburner.py`, `afterburner` | Afterburner (DRS in Hangar; `drs` is an alias): `afterburner on 2h` raises the queue caps for a while (more heavy jobs as memory allows, a second light slot, `nice -n 10`) and drops back to normal by itself. |
 | `tidy.py`, `tidy` | One step to clean build output to the Trash, push unpushed branches and back up to an attached drive. `tidy --dry-run` shows the plan. |
 | `hangar/` | Hangar, an optional SwiftUI menu-bar app with buttons for DRS (afterburner), the agent modes, tidy, save and backup (`Hangar.swift`, `build.sh`, `shots/`). |
-| `agentq.py`, `agentq` | Queue tracking via Claude Code hooks: every agent start and finish logged to `agents.jsonl`, a dated markdown view, and a PENDING backlog (`queue add` / `queue done`). Optional department tags: `queue list` and Hangar group agents by department and flag one that needs a supervisor. |
+| `agentq.py`, `agentq` | Queue tracking via Claude Code hooks: every agent start and finish logged to `agents.jsonl`, a shared work board with collision warnings, an idea box, a dated markdown view, and a PENDING backlog (`queue add` / `queue done`). Optional department tags: `queue list` and Hangar group agents by department and flag one that needs a supervisor. |
 | `usagegate.py` | The usage-limit prompt (Claude Code plans): asks what to do when weekly usage gets high, and holds the queue if you say so. Called by `memguard.py` every pass and by `heavyrun`. |
 | `usage_statusline.py` | Claude Code `statusLine` hook that feeds `usage.json` for `usagegate.py`. |
 | `timing_probe.py` | Host-noise probe that `heavyrun` runs before and after a timing job (~10 s each). |
@@ -322,6 +322,47 @@ Nothing changes until an agent carries a department: untagged setups show exactl
 <img src="hangar/shots/hangar_queue_depts_light.png" width="300" alt="Hangar Queue tab with departments, light mode">
 <img src="hangar/shots/hangar_queue_depts_dark.png" width="300" alt="Hangar Queue tab with departments, dark mode">
 </p>
+
+### Work board and ideas
+
+Parallel agents collide because none of them can see the others. The same hook gives them a shared board, and takes ideas from all of them.
+
+| Hook | What it does |
+|---|---|
+| `PostToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | Logs agent + repo-relative file to `touches.jsonl` (deduped per 10 min). Warns the agent when another running agent touched that file in the last 2 h (`AGENTQ_BOARD_HOURS`), naming who and what they are doing. Warn-only, at most once per 30 min per agent, file and peer |
+| `SessionStart`, `SubagentStart` | Gives the agent the board for its repo in under 30 lines, so it catches up with no tool calls |
+| `PostToolUse` on `Bash` | When the command was `queue idea`, fills in the idea's author agent and department |
+
+Linked git worktrees of one repo count as the same repo, so two branches heading for the same merge conflict do warn. Files outside any git repo are tracked by full path, except the system temp folders. Your agent's own parent session never counts as a collision.
+
+```
+queue board [repo text]     each running agent's department, task and files in the window; then promoted agents
+queue collisions [--all]    overlaps, last 24 h by default
+queue idea "<text>"         log an idea (--as NAME to name a proposer by hand)
+queue ideas [dept]          list them, new first (--new, --adopted, --parked)
+queue ideas --top           scoreboard by author agent
+queue adopt <id> [note]     queue park <id> [note]
+queue promote <agent> <role>    R#, agent id or unique prefix; the board and Hangar mark it
+```
+
+Ideas are proposals only. They never change scope or get built on their own, no hook ever feeds an idea's text to an agent, and `adopt` records a decision without starting anything. The operating model that goes with it (a one-line `Idea:` in every report, heads triage, the COO takes the best to the human, the best proposers are resumed by id for the next lead or supervisor role) is in [agent-governance](https://github.com/tsmartin29/agent-governance).
+
+Hook config, added to the block above:
+
+```json
+{
+  "PostToolUse":  [{ "matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [{ "type": "command", "timeout": 5,
+                      "command": "[ -x \"$HOME/.local/bin/agentq\" ] && \"$HOME/.local/bin/agentq\" hook; exit 0" }] },
+                   { "matcher": "Bash", "hooks": [{ "type": "command", "timeout": 5,
+                      "command": "c=$(cat); case \"$c\" in *\"queue idea\"*|*\"agentq idea\"*) printf '%s' \"$c\" | \"$HOME/.local/bin/agentq\" hook;; esac; exit 0" }] }],
+  "SessionStart": [{ "hooks": [{ "type": "command", "timeout": 5,
+                      "command": "[ -x \"$HOME/.local/bin/agentq\" ] && \"$HOME/.local/bin/agentq\" hook; exit 0" }] }]
+}
+```
+
+Cost per edit on a 2020s Mac: about 85 ms with a 3 MB log, less than the plain queue hook used to take. The hook takes no lock and never waits on a render, reads only the last 4 MB of the log, and reads the agent log only when a peer is in the same file; a `Bash` call that is not `queue idea` costs about 5 ms. It fails open: anything it cannot do goes to `hook_errors.log`, it exits 0, and stdout is empty or one valid `additionalContext`.
+
+Limits: edits made through Bash (`sed`, heredocs) are not seen, a resumed agent reappears on the board at its first edit, and top-level sessions have no finish event, so they count as running for the 2 h window. Tests: `tests/test_agentboard.py`.
 
 ### Tuning for your Mac
 

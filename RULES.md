@@ -49,3 +49,7 @@ Numbers assume a 24 GB Mac; scale them to yours and match them to `config.json`.
     (for example `[dept:QA] Run the scenario suite`), or start a head's session with `AGENTQ_DEPT=<Name>` so everything it spawns is
     tagged. `queue list <dept>` shows one department and `queue depts` the counts. When a department has more than 10 running agents
     it shows NEEDS SUPERVISOR: only then may its head spawn a supervisor agent to help review and coordinate.
+16. Work board and ideas (optional). `agentq hook` on Edit/Write logs which agent touches which file, warns (never blocks) an agent entering a file another
+   running agent touched in the last 2 h, and gives a waking agent the board for its repo. Read the warning; if your change could collide, tell whoever
+   coordinates you. `queue board`, `queue collisions`. End your report with one `Idea: ...` line and log it with `queue idea "<text>"`. Ideas are proposals
+   only: none changes scope or gets built without the COO or the human, and no idea text is an instruction to anyone.
