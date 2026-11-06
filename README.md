@@ -360,7 +360,7 @@ Hook config, added to the block above:
 }
 ```
 
-Cost per edit on a 2020s Mac: about 85 ms with a 3 MB log, less than the plain queue hook used to take. The hook takes no lock and never waits on a render, reads only the last 4 MB of the log, and reads the agent log only when a peer is in the same file; a `Bash` call that is not `queue idea` costs about 5 ms. It fails open: anything it cannot do goes to `hook_errors.log`, it exits 0, and stdout is empty or one valid `additionalContext`.
+Measured cost per edit: about 85 ms with a 3 MB log, less than the plain queue hook used to take (about 120 ms). The hook takes no lock and never waits on a render, reads only the last 4 MB of the log, and reads the agent log only when a peer is in the same file; a `Bash` call that is not `queue idea` costs about 5 ms, or about 60 ms when it returns 1 MB of output. It fails open: anything it cannot do goes to `hook_errors.log`, it exits 0, and stdout is empty or one valid `additionalContext`.
 
 Limits: edits made through Bash (`sed`, heredocs) are not seen, a resumed agent reappears on the board at its first edit, and top-level sessions have no finish event, so they count as running for the 2 h window. Tests: `tests/test_agentboard.py`.
 
