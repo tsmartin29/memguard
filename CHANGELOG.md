@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-08 (agentgate: roles, caps and Head review enforced by hooks)
+- New `agentgate/`: launch gate (Department, Role, Head brief, Cap, one at a time), spend watchdog (`agentcost.py` every 60 s, alert at 95% of cap, optional phone push), Head review reminder until a review file exists, Bash rules (no co-author trailer, Keychain, irreversible chip operations, protected ports, deploy only with `OWNER_OK=deploy`), public-wording rules.
+- Why: caps written in prompts were ignored (agents cannot see their spend) and head review was skipped; both now block or nag in code.
+- `config.example.json`, README section, RULES.md rule 17. Tests: 16 in `tests/test_agentgate.py`.
+
 ## 2026-11-05 (work board and ideas)
 - **Work board** in agentq: a `PostToolUse` hook on `Edit`/`Write`/`MultiEdit`/`NotebookEdit` logs agent + repo-relative file to `touches.jsonl` (append-only, deduped, no lock). Linked worktrees count as one repo.
 - **Collision warning**: an agent entering a file another running agent touched in the last 2 h gets `additionalContext` naming who and what they are doing; the overlap is logged. Warn-only, never blocks.

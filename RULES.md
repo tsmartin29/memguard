@@ -53,3 +53,8 @@ Numbers assume a 24 GB Mac; scale them to yours and match them to `config.json`.
    running agent touched in the last 2 h, and gives a waking agent the board for its repo. Read the warning; if your change could collide, tell whoever
    coordinates you. `queue board`, `queue collisions`. End your report with one `Idea: ...` line and log it with `queue idea "<text>"`. Ideas are proposals
    only: none changes scope or gets built without the COO or the human, and no idea text is an instruction to anyone.
+
+17. Agentgate (optional). Rules that matter are hooks, not prompt text. An agent launches only with a Department, a Role (the professional it
+    is and the standard its output must meet), a Head brief and a dollar Cap; one at a time unless the owner approved parallel work; a
+    watchdog prices its transcript every minute and the coordinating session is told to stop it at 95% of the cap; its work is not done
+    until a Head review file exists. Bash and wording rules block what the owner said never to do.

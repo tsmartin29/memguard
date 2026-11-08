@@ -1,0 +1,21 @@
+{
+  "departments": ["Firmware", "Apps", "QA", "Security", "Research", "Product", "Growth"],
+  "max_running": 1,
+  "default_cap": 5.0,
+  "warn_at": 0.95,
+  "reviews_dir": "~/.claude/agent_reviews",
+  "state_dir": "~/.claude/agent_watch",
+  "require_file": "AGENT_STANDARD.md",
+  "push_cmd": "",
+  "exempt_types": ["web-fetch", "claude-code-guide", "statusline-setup"],
+  "no_coauthor": true,
+  "no_keychain": true,
+  "no_chip_burn": true,
+  "protected_ports": [],
+  "deploy_patterns": ["\\bwrangler\\b[^\\n]*\\bpages\\s+deploy", "netlify\\s+deploy\\s[^\\n]*--prod", "vercel\\s[^\\n]*--prod"],
+  "public_paths": ["/site/src/", "/decks/"],
+  "banned_phrases": [
+    {"rx": "\\bguarantee(d|s)?\\b", "why": "never promise a guarantee"},
+    {"rx": "\\bfield[- ]tested\\b", "why": "say bench tested, or in build, until it has been in the field"}
+  ]
+}

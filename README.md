@@ -323,6 +323,41 @@ Nothing changes until an agent carries a department: untagged setups show exactl
 <img src="hangar/shots/hangar_queue_depts_dark.png" width="300" alt="Hangar Queue tab with departments, dark mode">
 </p>
 
+### Agentgate: roles, caps and Head review, enforced by hooks
+
+Rules written into an agent's prompt are not rules. On one day three test agents, each told "hard stop at $3.50", spent $8.10, $6.34 and
+$5.18 and wrote no report: a subagent cannot see its own spend. Another day the department-head review from the section above was simply
+skipped. `agentgate/` turns those rules into hooks that block.
+
+- **Launch gate** (`agentgate.py gate`, PreToolUse on `Agent|Task`): the prompt must carry `Department:` (one of your departments),
+  `Role:` (the professional the agent is and the standard its output must meet, e.g. "senior QA engineer for life-safety systems;
+  reproducible, severity-ranked findings"), `Head brief:` (scope, setup, done-criteria), `Cap: $N`, and optionally a pointer to your
+  standards file. One agent at a time by default (`max_running`); a prompt line `Parallel: owner-approved` lifts it. Nothing launches while
+  an agent is over its cap.
+- **Spend watchdog** (`watchdog.py`, started on launch): `agentcost.py` prices the agent's transcript every 60 s. At 95% of the cap the
+  coordinating session is told on every step to stop it, and `push_cmd` (if set) pings your phone once.
+- **Head review** (`agentgate.py stop` on SubagentStop, `alerts` on every step): a finished agent's work is not done until a review file
+  exists (`<reviews_dir>/<agent id>.md`); until then every step carries a reminder.
+- **Bash rules** (`rules_bash.py`): no Co-Authored-By trailer; optional no Keychain, no irreversible chip operations (eFuse, secure boot,
+  erase, APPROTECT, UICR), no killing processes on your protected ports, deploy commands only with `OWNER_OK=deploy`. Heredoc text is data.
+- **Wording rules** (`rules_wording.py`): phrases you never use in public files (paths you list), e.g. "guaranteed".
+
+Install: copy `agentgate/config.example.json` to `~/.config/agentgate/config.json`, then add to `~/.claude/settings.json`:
+
+```json
+"PreToolUse":  [{"matcher": "Agent|Task", "hooks": [{"type": "command", "command": "python3 /path/to/memguard/agentgate/agentgate.py gate"}]},
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 /path/to/memguard/agentgate/rules_bash.py"}]},
+                {"matcher": "Write|Edit|MultiEdit", "hooks": [{"type": "command", "command": "python3 /path/to/memguard/agentgate/rules_wording.py"}]}],
+"PostToolUse": [{"matcher": "Agent|Task", "hooks": [{"type": "command", "command": "python3 /path/to/memguard/agentgate/agentgate.py register"}]},
+                {"matcher": "", "hooks": [{"type": "command", "command": "python3 /path/to/memguard/agentgate/agentgate.py alerts"}]}],
+"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 /path/to/memguard/agentgate/agentgate.py alerts"}]}],
+"SubagentStop": [{"hooks": [{"type": "command", "command": "python3 /path/to/memguard/agentgate/agentgate.py stop"}]}]
+```
+
+Limits: a hook cannot stop a running subagent by itself; it tells the coordinating session, which stops it. Prices in `agentcost.py` are
+list prices you keep current. Approvals that only happen in conversation ("deploy", "flash this board") cannot be verified by a script;
+`OWNER_OK=deploy` makes the step deliberate, not proven. Tests: `tests/test_agentgate.py` (16).
+
 ### Work board and ideas
 
 Parallel agents collide because none of them can see the others. The same hook gives them a shared board, and takes ideas from all of them.
