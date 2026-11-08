@@ -73,7 +73,7 @@ def register(inp, c):
     ti = inp.get("tool_input") or {}
     if (ti.get("subagent_type") or "") in c["exempt_types"]: return 0
     resp = json.dumps(inp.get("tool_response", ""))
-    aid, out = re.search(r"agentId:\s*([0-9a-f]{8,})", resp), re.search(r"output_file:\s*(\S+?\.output)", resp)
+    aid, out = re.search(r"\\b(a[0-9a-f]{16})\\b", resp) or re.search(r"agentId\\W+([0-9a-f]{8,})", resp), re.search(r"output_?[Ff]ile\\W+(/[^\\s\"\\\\]+?\\.output)", resp)
     if not aid or not out: return 0
     p = ti.get("prompt") or ""
     capm, dm = re.search(r"Cap:\s*\$\s*(\d+(?:\.\d+)?)", p), re.search(r"Department:\s*([^\n]+)", p)
