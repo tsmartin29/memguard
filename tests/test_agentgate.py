@@ -27,3 +27,10 @@ def test_bash_deploy_needs_ok(): assert B.check("npx wrangler@4 pages deploy pub
 
 def test_wording_public_blocked(): assert Wd.hits("/x/site/src/index.html", "Alerts are guaranteed", C)
 def test_wording_internal_free(): assert not Wd.hits("/x/docs/notes.md", "guaranteed", C)
+
+import json, re
+_ID, _OUT = "a5f2f5480c7e919a6", "/private/tmp/x/tasks/a5f2f5480c7e919a6.output"
+def _parse(resp): return (re.search(G.ID_RX[0], resp) or re.search(G.ID_RX[1], resp)).group(1), re.search(G.OUT_RX, resp).group(1)
+def test_register_parses_plain_text(): assert _parse(json.dumps("agentId: %s (internal)\noutput_file: %s\nDo NOT" % (_ID, _OUT))) == (_ID, _OUT)
+def test_register_parses_json(): assert _parse(json.dumps({"agentId": _ID, "outputFile": _OUT})) == (_ID, _OUT)
+def test_register_parses_content_blocks(): assert _parse(json.dumps([{"type": "text", "text": "agentId: %s\noutput_file: %s" % (_ID, _OUT)}])) == (_ID, _OUT)

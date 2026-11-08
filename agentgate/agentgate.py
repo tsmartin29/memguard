@@ -20,6 +20,8 @@ DEFAULTS = {"departments": ["Firmware", "Apps", "QA", "Security", "Research", "P
             "reviews_dir": "~/.claude/agent_reviews", "state_dir": "~/.claude/agent_watch", "warn_at": 0.95, "default_cap": 5.0,
             "push_cmd": "", "exempt_types": ["web-fetch", "claude-code-guide", "statusline-setup"], "require_file": ""}
 
+ID_RX = (r"\b(a[0-9a-f]{16})\b", r"agentId\W+([0-9a-f]{8,})")          # plain-text and JSON Agent responses
+OUT_RX = r"output_?[Ff]ile\W+(/[^\s\"\\]+?\.output)"
 def cfg():
     c = dict(DEFAULTS)
     try:
@@ -73,7 +75,7 @@ def register(inp, c):
     ti = inp.get("tool_input") or {}
     if (ti.get("subagent_type") or "") in c["exempt_types"]: return 0
     resp = json.dumps(inp.get("tool_response", ""))
-    aid, out = re.search(r"\\b(a[0-9a-f]{16})\\b", resp) or re.search(r"agentId\\W+([0-9a-f]{8,})", resp), re.search(r"output_?[Ff]ile\\W+(/[^\\s\"\\\\]+?\\.output)", resp)
+    aid, out = re.search(ID_RX[0], resp) or re.search(ID_RX[1], resp), re.search(OUT_RX, resp)
     if not aid or not out: return 0
     p = ti.get("prompt") or ""
     capm, dm = re.search(r"Cap:\s*\$\s*(\d+(?:\.\d+)?)", p), re.search(r"Department:\s*([^\n]+)", p)
